@@ -1,0 +1,1037 @@
+---
+title: "Interactive routes"
+editor: visual
+---
+
+## Quarto
+
+```{r}
+library(devtools)
+library(elevatr)
+library(r5r)
+library(sf)
+library(osmextract)
+library(rJava)
+library(tidyverse)
+library(geobr)
+library(here)
+library(tigris)
+library(tidycensus)
+library(mapview)
+library(RColorBrewer)
+library(readxl)
+library(janitor)
+library(httr)
+library(hms)
+library(raster)
+library(terra)
+library(osmdata)
+
+# turn off scientific notation
+options(scipen = 999)
+```
+
+# Load school shapes
+
+```{r}
+# school points 
+D_school_locs <- st_read("data/shapes/city_schools/Baltimore_City_Schools.shp") %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326)
+
+
+# filter points down to high schools and middle schools 
+hs_locs_join <- 
+  D_school_locs %>% 
+  filter(str_detect(class, "9 - 12|6 - 12|6 - 8|5 - 8")) %>% 
+  mutate(join_addr = str_to_lower(address), 
+  ) 
+
+# df version for joining
+hs_locs_join_df <- 
+  hs_locs_join %>% 
+  as.data.frame() %>% 
+  mutate(prg_num = as.character(prg_num))
+
+# read in school parcels 
+D_school_parcels <- st_read("data/shapes/school_parcels/school_parcels.geojson") %>% 
+  distinct(.keep_all = T) %>%
+  mutate(schools_at_parcel = 
+           case_when(
+             schools_at_parcel == "Crossroads School, The" ~ "The Crossroads School",
+             schools_at_parcel == "Belair-Edison School, The" ~ "The Belair-Edison School",
+             schools_at_parcel == "Dallas F. Nicholas, Sr., Elementary School" ~ "Dallas F. Nicholas Sr. Elementary School",
+             schools_at_parcel == "Green School Of Baltimore, The" ~ "The Green School Of Baltimore",
+             schools_at_parcel == "Reach! Partnership School, The" ~ "The Reach! Partnership School",
+             schools_at_parcel == "Dr. Bernard Harris, Sr., Elementary School" ~ "Dr. Bernard Harris Sr. Elementary School",
+             schools_at_parcel == "Historic Samuel Coleridge-Taylor Elementary School, The, Joseph C. Briscoe Academy" ~ "The Historic Samuel Coleridge-Taylor Elementary School, The Joseph C. Briscoe Academy",
+             TRUE ~ schools_at_parcel
+           )) %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326)
+
+# D_school_parcels %>% 
+#   st_write("/Users/greg.morton/Documents/baltimoreBanner/Projects/2024/high_school_transportation_routing/data/shapes/school_parcels/parcels_01_22.geojson")
+
+
+# join school parcels to high school locations
+hs_parcels_buffer <- 
+  D_school_parcels %>% 
+  st_join(hs_locs_join) %>%
+  dplyr::select(school_name, name, join_addr, fulladdr) %>% 
+  filter(!is.na(name)) %>% 
+  distinct(name, .keep_all = T) %>% 
+  as.data.frame() %>% 
+  left_join(hs_locs_join_df,
+            by = c(name = "name")) %>% 
+  filter(str_detect(class, "9 - 12|6 - 12|6 - 8|5 - 8")) %>% 
+  st_as_sf() %>%
+  st_transform(29902)
+
+
+# join df for hs parcels (we just need school number from here)
+hs_parcel_join <- 
+  hs_parcels_buffer %>% 
+  as.data.frame() %>% 
+  mutate(school_number = as.character(prg_num)) %>% 
+  ungroup()
+
+# get start stop times 
+start_stop_times <- read_csv("data/setup/start_stop_times.csv") %>% 
+  janitor::clean_names() %>% 
+  mutate(school_number = as.character(school_number))
+
+# select relevant columns 
+sst_new <- start_stop_times %>% 
+  left_join(hs_parcel_join, by = c("school_number" = "school_number")) %>% 
+  filter(!is.na(name)) %>% 
+  dplyr::select(school_number, name, am_bell, pm_bell, district_early_release_time, address.y
+                ) 
+
+# load functions I need to access MTA API
+source("functions/mta_api_functions.R")
+
+
+```
+
+### Load Baltimore City Shape
+
+```{r}
+# get baltimmore city census tracts 
+bmore_tracts <- tigris::tracts(
+  state = "MD", 
+  county = "Baltimore City"
+) %>%
+  tigris::erase_water() %>%
+  st_transform(4326) %>%
+  # First make valid
+  st_make_valid() %>%
+  # Remove any empty geometries
+  filter(!st_is_empty(.)) %>%
+  # Extract polygons
+  st_collection_extract("POLYGON") %>%
+  # Remove any potential duplicate vertices and fix other issues
+  st_buffer(0) %>%
+  # Group and union
+  group_by(GEOID, NAME) %>% 
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+# add parks so we can remove them 
+parks <- st_read("data/shapes/Parks/Parks.shp") %>% st_transform(32618) 
+
+# add a slight buffer to the parks so we can remove them from the tracts
+parks <- st_buffer(parks, 50) %>% st_union() %>% st_transform(4326)
+
+# add schools so we can remove them 
+schools <- hs_parcels_buffer %>% 
+  st_buffer(100) %>% 
+  st_union() %>% 
+  st_transform(4326)
+
+
+grid <- raster("data/raw/GHS_BUILT_S_E2030_GLOBE_R2023A_54009_100_V1_0_R5_C12/GHS_BUILT_S_E2030_GLOBE_R2023A_54009_100_V1_0_R5_C12.tif")
+
+grid <- projectRaster(grid, crs = st_crs(4326)$proj4string)
+
+bbox <- extent(st_bbox(bmore_tracts))
+
+area_bbox <- st_bbox(bmore_tracts) %>% 
+  st_as_sfc() %>% 
+  st_transform(4326) %>% 
+  st_buffer(3000) %>% 
+  st_bbox() %>% 
+  st_as_sfc() %>% 
+  st_transform(4326) %>% 
+  st_bbox()
+
+# area_bbox %>% 
+#   mapview() +
+#   map
+```
+
+```{r}
+# pbf_file <- "/Users/greg.morton/Documents/baltimoreBanner/Projects/2024/high_school_transportation_routing/data/poa/2025-01-13/baltimore.osm.pbf"
+
+# Read the PBF file using sf
+# streets <- sf::st_read(pbf_file, layer = "lines", quiet = TRUE)
+# 
+# # Filter for roads (you can modify these conditions based on your needs)
+# roads <- streets[streets$highway %in% c("motorway", "trunk", "primary", "secondary",
+#                                       "tertiary", "residential", "unclassified"), ]
+# #   
+# # Create an interactive visualization
+# map <- mapview(roads,
+#               zcol = "highway",  # Color by road type
+#               col.regions = rainbow(length(unique(roads$highway))),
+#               layer.name = "Street Network",
+#               map.types = c("OpenStreetMap", "Esri.WorldImagery"),
+#               legend = TRUE,
+#               popup = TRUE)
+# 
+
+# industrial zones along the water 
+mizod <- st_read("/Users/greg.morton/Documents/baltimoreBanner/Projects/2024/high_school_transportation_routing/data/shapes/MIZOD/MIZOD.shp") %>% 
+  st_union() %>% 
+  st_transform(4326) 
+
+
+
+
+```
+
+```{r}
+cropped_raster <- crop(grid, bbox)
+
+baltimore_grid <- rasterToPoints(cropped_raster, spatial = TRUE)
+
+# get Baltimore elevation data from elevatr
+# Convert bbox to sf object for get_elev_raster
+aoi <- st_as_sfc(st_bbox(area_bbox)) %>%
+  st_sf() %>%
+  st_set_crs(4326)
+
+# Step 2: Get elevation data using elevatr
+# zoom = 9-14 determines resolution (higher = more detailed but larger file)
+elevation_raster <- get_elev_raster(locations = aoi, z = 12, clip = "locations")
+
+elevation_terra <- rast(elevation_raster)  # Convert to terra format
+
+writeRaster(elevation_terra, 
+            filename = "data/poa/elevation.tif",
+            overwrite = TRUE)
+
+```
+
+```{r}
+# version of tracts with no parks 
+bmore_tracts_no_parks <- 
+  bmore_tracts %>% 
+  st_difference(parks) %>%
+  st_difference(schools) %>%
+  st_difference(mizod) 
+
+
+# get a new grid sample
+# baltimore_grid_sampled <-
+#   baltimore_grid %>%
+#   as.data.frame() %>%
+#   st_as_sf(coords = c("x", "y"), crs = 4326) %>%
+#   st_difference(parks) %>%
+#   st_difference(schools) %>%
+#   st_difference(mizod) %>%
+#   st_join(bmore_tracts) %>%
+#   filter(!is.na(GEOID)) %>%
+#   # filter(!is.na(median_income)) %>%
+#   group_by(GEOID) %>%
+#   filter(GHS_BUILT_S_E2030_GLOBE_R2023A_54009_100_V1_0_R5_C12 > 3000) %>%
+#   # Calculate points_to_sample based on population proportion
+#   # Use group_modify to sample points
+#   # group_modify(~ slice_sample(.x, n = first(.x$points_to_sample), replace = TRUE)) %>%
+#   # sample one point from each tract
+#   group_modify(~ slice_sample(.x, n = 1, replace = TRUE)) %>%
+#   ungroup() %>%
+#   st_as_sf(crs = 4326) %>%
+#   st_make_valid() %>%
+#   mutate(geometry = st_make_valid(geometry)) %>%
+#   mutate(lon = map_dbl(geometry, ~st_coordinates(.)[1]),
+#          lat = map_dbl(geometry, ~st_coordinates(.)[2])) %>%
+#   ungroup() %>%
+#   mutate(id = row_number())
+
+baltimore_grid_sampled <-
+  st_read("data/shapes/bmore_grid_sampled_01_27.geojson") %>%
+  st_as_sf() %>% 
+  mutate(key = 1)
+
+
+# broken_start <-
+#   sht_bell_test %>%
+#   .[4140,] %>%
+#   dplyr::select(geometry) %>%
+#   st_as_sf()
+# 
+baltimore_grid_sampled %>%
+  mapview(zcol = "GHS_BUILT_S_E2030_GLOBE_R2023A_54009_100_V1_0_R5_C12", legend = F) +
+mapview(bmore_tracts_no_parks) 
+
+```
+
+```{r}
+# make a join version with lat and lon for r5r
+bmore_tracts_join <-
+  bmore_tracts %>% 
+  clean_names() %>% 
+  dplyr::select(geoid, name, geometry) %>% 
+  rename(tract_name = name) %>%
+  st_as_sf() %>% 
+  st_transform(4326) %>% 
+  st_difference(parks) %>% 
+  st_make_valid() %>%
+  mutate(
+    valid_geometry = st_make_valid(geometry),  # Ensure geometries are valid
+    tract_point = st_centroid(valid_geometry),  # Calculate the centroid of the land area,
+    tract_point_lat = st_coordinates(tract_point)[, 2],  # Extract the latitude of the centroid
+    tract_point_lon = st_coordinates(tract_point)[, 1]  # Extract the longitude of the centroid
+  ) 
+
+
+```
+
+### Load student location data
+
+The 'student_home_tract_XX' objects hold info about where a student is going and where they are coming from.
+
+There is a row for each combination of home census tract and school in the data.
+
+```{r}
+# read student home tract data 
+student_home_tracts_23 <- 
+  read_xlsx("data/home_tracts/REVISED Banner Request-Enroll by Prog and Tract-2024.08.08.xlsx", sheet = 2, skip = 5) %>% 
+  clean_names() %>% 
+  mutate(prog_no = as.character(prog_no)) %>%
+  # change all colnames to character
+  mutate(across(-c(prog_no, program, enrollment), ~ as.numeric(as.character(.)))) %>%
+  # Pivot longer to convert census tract columns into rows
+  pivot_longer(
+    cols = -c(prog_no, program, enrollment),
+    names_to = "census_tract",
+    values_to = "students"
+  ) %>% 
+  left_join(hs_parcel_join, by = c("prog_no" = "school_number")) %>%
+  dplyr::select(prog_no, program, enrollment, school_name, name, everything()) %>%
+  mutate(students = ifelse(is.na(students), 5, students)) %>%
+  filter(!is.na(school_name),
+         students > 0
+         )  %>%
+  dplyr::select(-x, -y, -join_addr.y, -GlobalID, -class, -category, -OBJECTID, -join_addr.x) %>% 
+  rename(school_polygon = geometry.x,
+         school_point = geometry.y) %>% 
+  mutate(school_point = st_make_valid(school_point)) %>% 
+  mutate(school_point_lat = st_coordinates(school_point)[, 2],
+         school_point_lon = st_coordinates(school_point)[, 1],
+         census_tract = str_remove_all(census_tract, "x")) %>% 
+  as.data.frame() %>%
+  # There are two ways that we can assign students home tracts
+  # first we can simply use "bmore_tracts_join", an sf object that simply takes the centerpoint of each tract
+  # the upside here is that it's easier and its consistent
+  # The downside is that sometimes it can put our point at a place we know no one lives, like a park or industrial area
+  # left_join(bmore_tracts_join, by = c("census_tract" = "geoid")) 
+  # The second method is to sample human settlement points from the raster grid and join them to the tracts
+  # We'll then take a random point from each tract to represent the students home location
+  # This is probably more accurate but it's also more computationally expensive
+  # We'll do both and compare the results
+  left_join(baltimore_grid_sampled, by = c("census_tract" = "GEOID")) %>% 
+  rename(
+    tract_point_lat = lat,
+    tract_point_lon = lon
+  ) 
+
+
+
+
+# make enrollment df
+enrollment_23 <- 
+  read_xlsx("data/home_tracts/REVISED Banner Request-Enroll by Prog and Tract-2024.08.08.xlsx", sheet = 2, skip = 5) %>% 
+  clean_names() %>% 
+  mutate(prog_no = as.character(prog_no)) %>%
+  # change all colnames to character
+  mutate(across(-c(prog_no, program, enrollment), ~ as.numeric(as.character(.)))) %>%
+  # Pivot longer to convert census tract columns into rows
+  pivot_longer(
+    cols = -c(prog_no, program, enrollment),
+    names_to = "census_tract",
+    values_to = "students"
+  ) %>% 
+  # left_join(hs_parcel_join, by = c("prog_no" = "school_number")) %>%
+  dplyr::select(prog_no, program, enrollment, everything()) %>% 
+  mutate(students = ifelse(is.na(students), 5, students)) %>%
+  filter(!is.na(program),
+         students > 0
+         )  %>% 
+  dplyr::select(
+    prog_no,
+    program,
+    enrollment
+  ) %>% 
+  mutate(program_join = str_to_lower(str_replace_all(program, " ", "_"))) %>% 
+  group_by(program) %>% 
+  distinct() %>% 
+  ungroup() %>% 
+  left_join(hs_locs_join_df, by = c("prog_no" = "prg_num")) %>% 
+  filter(!is.na(name))
+
+
+# get enrollment by tract 
+enrollment_by_tract <-
+  student_home_tracts_23 %>%
+  dplyr::select(
+    census_tract,
+    name,
+    students,
+    zipcode
+  )
+
+
+
+
+```
+
+# Every possible tract/school combination
+
+```{r}
+# create a version of `hs_parcel_join` that gives us a many to many join
+hs_parcel_join_m_2_m <- 
+  hs_parcel_join %>% 
+  mutate(key = 1)
+
+# population by tract 
+pop_by_tract <- 
+  get_acs(
+    year = 2023,
+    geography = "tract", 
+    variables = "B01003_001", 
+    state = "MD", 
+    county = "Baltimore City") 
+
+
+baltimore_grid_sampled_pop <- 
+  baltimore_grid_sampled %>% 
+  mutate(key = 1) %>% 
+  left_join(pop_by_tract, by = c("GEOID" = "GEOID")) %>% 
+  rename(pop = estimate) %>% 
+  filter(pop > 0)
+
+
+# create a many to many join
+every_missing_tract_school_combo <- 
+  baltimore_grid_sampled_pop %>% 
+  left_join(hs_parcel_join_m_2_m, by = "key") %>% 
+  rename(census_tract = GEOID) %>% 
+  anti_join(student_home_tracts_23, by = c("census_tract" = "census_tract", "name" = "name")) %>% 
+    as.data.frame() %>% 
+    rename(school_polygon = geometry.x,
+           school_point = geometry.y) %>% 
+  mutate(school_point = st_make_valid(school_point)) %>% 
+  mutate(school_point_lat = st_coordinates(school_point)[, 2],
+         school_point_lon = st_coordinates(school_point)[, 1],
+         census_tract = str_remove_all(census_tract, "x")) %>% 
+  as.data.frame() %>% 
+  rename(
+  tract_point_lat = lat,
+  tract_point_lon = lon
+)
+
+
+every_tract_school_combo %>% 
+  group_by(GEOID) %>% 
+  count()
+
+every_missing_tract_school_combo %>% 
+  dplyr::select(
+    census_tract,
+    tract_point,
+    tract_point_lat,
+    tract_point_lon,
+    school_name,
+    school_polygon,
+    school_point,
+    school_point_lat,
+    school_point_lon
+  ) %>% 
+  View()
+
+
+# get population by tract so we can filter empty ones 
+
+
+
+```
+
+### Load MTA stuff
+
+```{r}
+# mta routes 
+routes_url <- "https://api.goswift.ly/info/mta-maryland/routes"
+
+# light rail url for api call
+light_rail_url <- "https://api.goswift.ly/info/mta-maryland-light-rail/routes/"
+
+# metro url for api call
+metro_url <- "https://api.goswift.ly/info/mta-maryland-metro/routes/"
+
+# get bus api response
+routes_response <- VERB("GET", routes_url, add_headers('Authorization' = '0352517c0285694758568f98b6f013ba'), content_type("application/octet-stream"), accept("application/json"))
+
+# light rail api response
+light_rail_response <- VERB("GET", light_rail_url, add_headers('Authorization' = '0352517c0285694758568f98b6f013ba'), content_type("application/octet-stream"), accept("application/json"))
+
+# metro api response 
+metro_response <- VERB("GET", metro_url, add_headers('Authorization' = '0352517c0285694758568f98b6f013ba'), content_type("application/octet-stream"), accept("application/json"))
+
+# routes json
+routes_json <- content(routes_response, "text")
+
+# lr json
+light_rail_json <- content(light_rail_response, "text")
+
+# metro json
+metro_json <- content(metro_response, "text")
+
+# turn em all into dataframes
+mta_routes <- 
+  jsonlite::fromJSON(routes_json, simplifyDataFrame = T, flatten = F) %>% 
+  .$data %>% 
+  .$routes %>% 
+  clean_names
+
+light_rail_routes <-
+    jsonlite::fromJSON(light_rail_json, simplifyDataFrame = T, flatten = F) %>% 
+  .$data %>% 
+  .$routes %>% 
+  clean_names
+
+metro_routes <-
+    jsonlite::fromJSON(metro_json, simplifyDataFrame = T, flatten = F) %>%
+  .$data %>%
+  .$routes %>%
+  clean_names
+
+all_routes <- 
+  bind_rows(mta_routes, light_rail_routes, metro_routes) %>% 
+  mutate(short_name = str_remove_all(short_name, " "))
+
+D_school_parcels <- st_read("data/shapes/school_parcels/school_parcels.geojson") %>% 
+  distinct(.keep_all = T) %>%
+  mutate(schools_at_parcel = 
+           case_when(
+             schools_at_parcel == "Crossroads School, The" ~ "The Crossroads School",
+             schools_at_parcel == "Belair-Edison School, The" ~ "The Belair-Edison School",
+             schools_at_parcel == "Dallas F. Nicholas, Sr., Elementary School" ~ "Dallas F. Nicholas Sr. Elementary School",
+             schools_at_parcel == "Green School Of Baltimore, The" ~ "The Green School Of Baltimore",
+             schools_at_parcel == "Reach! Partnership School, The" ~ "The Reach! Partnership School",
+             schools_at_parcel == "Dr. Bernard Harris, Sr., Elementary School" ~ "Dr. Bernard Harris Sr. Elementary School",
+             schools_at_parcel == "Historic Samuel Coleridge-Taylor Elementary School, The, Joseph C. Briscoe Academy" ~ "The Historic Samuel Coleridge-Taylor Elementary School, The Joseph C. Briscoe Academy",
+             TRUE ~ schools_at_parcel
+           )) %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326) %>% 
+  mutate(school_number = as.character(school_number)) %>% 
+  left_join(enrollment_23, by = c("school_number" = "prog_no")) %>% 
+  filter(!is.na(program_join)) 
+
+```
+
+```{r}
+### Setup r5r (to fill missing routes we're going to use the GTFS file from 1/27)
+
+
+# start rjava and allocate enough memory for r5r
+rJava::.jinit()
+options(java.parameters = "-Xmx50g")
+rJava::.jcall("java.lang.System", "S", "getProperty", "java.version")
+# un-comment for session details 
+# session_info()
+# r5r::r5r_sitrep()
+
+# load baltimore shape un-comment if you need to load osm file
+# baltimore_shape <-
+#   tigris::places("Baltimore", state = "MD", class = "city") %>%
+#   filter(NAME == "Baltimore") %>%
+#   st_as_sf()  %>%
+#   st_transform(4326) 
+
+# define the modes of transit we need gtfs files for
+modes <- c("light-rail", "local-bus", "metro")
+
+# get todays date in the format we need
+# today <- lubridate::today() %>% 
+#   as.character() %>%
+#   str_split(" ") %>% 
+#   map_chr(1)
+
+# create a directory for the data
+# dir.create(here::here("data/poa/", today), showWarnings = F)
+
+
+# grab today's GTFS files 
+# lapply(modes, function(x) {
+#   gtfs_url <- paste0("https://feeds.mta.maryland.gov/gtfs/", x)
+#   download.file(gtfs_url, paste0("data/poa/",today, "/", x, "_gtfs.zip"))
+#   })
+
+# grab .tif elevation 
+# tst <- st_read("/Users/greg.morton/Documents/baltimoreBanner/Projects/2024/high_school_transportation/data/NED10M_SpatialMetadata/NED10M_fe2947_October2018.shp") %>% 
+#   st_transform(4326) %>% 
+#   st_set_crs(4326) 
+
+# get osm data for baltimore
+# oe_get("us/maryland", stringsAsFactors = FALSE, quiet = FALSE)
+# oe_download_directory()
+
+# get the bounding box of the baltimore shape
+# area_bbox <- sf::st_bbox(baltimore_shape)
+
+# path to osmosis
+osmosis_path <- "/opt/homebrew/bin/osmosis"
+
+# path to the large .pbf file
+large_pbf_path <- "data/poa/maryland-latest.osm.pbf"
+
+
+# path where you want to save the smaller .pbf file
+smaller_pbf <-"data/poa/baltimore_complete_ways_complete_relations.osm.pbf"
+
+# prepare call to osmosis
+osmosis_cmd <- sprintf(
+  "%s --read-pbf file=%s --bounding-box completeWays=yes left=%s bottom=%s right=%s top=%s --write-pbf file=%s",
+  osmosis_path, large_pbf_path,
+  area_bbox["xmin"], area_bbox["ymin"], area_bbox["xmax"], area_bbox["ymax"],
+  smaller_pbf
+)
+
+# call to osmosis
+system(osmosis_cmd, intern = TRUE)
+
+# copy the OSM PBF files from data/osm_pbf into today's poa directory
+path = paste0("data/poa/", as.character(today), "/baltimore.osm.pbf")
+
+file.copy(
+  from = "data/poa/baltimore_complete_ways_complete_relations.osm.pbf",
+  to = paste0("data/poa/", as.character(today), "/baltimore.osm.pbf"),
+  overwrite = TRUE
+)
+
+# copy .tif file 
+file.copy(
+  from = "data/poa/elevation.tif",
+  to = paste0("data/poa/", as.character(today), "/elevation.tif"),
+  overwrite = TRUE
+)
+
+
+
+# setup r5r
+r5r_core <- setup_r5(here::here(paste0("data/poa/", "2025-01-27")),
+                     temp_dir = F,
+                     verbose = T,
+                     overwrite = F
+                     )
+
+r5r_core
+
+# stop r5r
+r5r::stop_r5(r5r_core)
+# rJava::.jgc(R.gc = TRUE)
+```
+```{r}
+# get the rest of our school info with a join 
+school_info_join <- 
+  student_home_tracts_23 %>% 
+    dplyr::select(prog_no,
+                  program,
+                  # name,
+                  # bldg_num,
+                  # grades,
+                  # type
+                  # coord_type,
+                  # lat,
+                  # lon,
+    ) %>% 
+  distinct()
+
+# Define modes of transit
+mode <- c("WALK", "TRANSIT") 
+
+# Set the max search time window (e.g., 90 minutes)
+max_search_time <- 150
+
+# Initialize a list to store results
+travel_times_list_interact <- list()
+latest_departure_times <- list()
+latest_travel_times <- list()
+
+# Simplify school data and join with student home tracts
+sst_slim <- sst_new %>% 
+  dplyr::select(name, school_number, am_bell, pm_bell, district_early_release_time) %>% 
+  rename(name_sst = name)
+
+# add bell times to student home tract dat
+missing_student_home_tracts_with_bell_times <- every_missing_tract_school_combo %>% 
+  left_join(sst_slim, by = c("prg_num" = "school_number")) %>% 
+  # remove NACA Freedom and Democracy Academy II (which has closed )
+  filter(name != "NACA Freedom and Democracy Academy II") %>% 
+  left_join(school_info_join, by = c(
+                                     "prg_num" = "prog_no")
+  ) %>% 
+  filter(!is.na(program)) %>% 
+  mutate(id = row_number()) %>% 
+  rename(prog_no = prg_num)
+
+
+every_missing_tract_school_combo %>% 
+  left_join(sst_slim, by = c("prg_num" = "school_number")) %>% 
+  # remove NACA Freedom and Democracy Academy II (which has closed )
+  filter(name != "NACA Freedom and Democracy Academy II") %>% 
+  left_join(school_info_join, by = c(
+                                     "prg_num" = "prog_no")
+  ) %>% 
+  filter(is.na(program)) %>% 
+  mutate(id = row_number()) %>% 
+  rename(prog_no = prg_num) %>% 
+  group_by(name) %>% 
+  count(sort = T)
+
+
+# Test with a subset
+sht_bell_test <- 
+  missing_student_home_tracts_with_bell_times 
+
+
+```
+
+```{r}
+for(i in 1:nrow(sht_bell_test )){
+  
+  # Get one row of data
+  one_row <- sht_bell_test [i, ] %>% 
+    st_drop_geometry() %>% 
+    dplyr::select(-geometry) %>% 
+    dplyr::select(-school_point,
+                  -school_polygon)
+
+  
+  # Prepare data for r5r
+  one_row_test <- one_row %>% 
+    mutate(school_lat_lon = paste0(school_point_lat, ",", school_point_lon),
+           home_tract_lat_lon = paste0(tract_point_lat, ",", tract_point_lon)) %>% 
+    pivot_longer(
+      cols = c("home_tract_lat_lon", "school_lat_lon"),
+      names_to = "coord_type",
+      values_to = "coord") %>% 
+    mutate(id = ifelse(
+      coord_type == "home_tract_lat_lon", 
+      janitor::make_clean_names(census_tract), 
+      str_replace_all(stringr::str_to_lower(program), " ", "_"))
+      ) %>% 
+    mutate(lat = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][1])),
+           lon = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][2]))) %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+    mutate(geometry = st_make_valid(geometry)) %>% 
+    # re-separate lat and lon
+    mutate(lat = st_coordinates(geometry)[, 2],
+           lon = st_coordinates(geometry)[, 1]) %>% 
+    dplyr::select(prog_no,
+                  # program,
+                  name,
+                  census_tract,
+                  # students,
+                  bldg_num,
+                  grades,
+                  type,
+                  coord_type,
+                  id,
+                  lat,
+                  lon,
+                  am_bell,
+                  pm_bell) %>%
+    # five minutes before the bell will be the latest arrival time we'll allow 
+    mutate(latest_arrival = as_hms((am_bell) - 5 * 60)) 
+  
+  # Initialize the latest valid departure time as the earliest possible
+  latest_departure_time <- NA
+  
+  # Prepare data for joining with school data
+  school_join_object <- one_row_test %>% 
+    filter(coord_type != "home_tract_lat_lon") %>% 
+    dplyr::select(id, 
+                  prog_no, 
+                  bldg_num, 
+                  name, type, 
+                  grades, 
+                  # students, 
+                  am_bell, 
+                  pm_bell)
+  
+  # Loop to find the latest valid departure time
+  for (j in seq(from = max_search_time, to = 10, by = -10)) {
+    
+    # start from the earliest possible time (in our case, it'll be 2 hours before the morning bell)
+    departure_time <- as.POSIXct(paste(date, one_row_test[1,]$am_bell), format = "%Y-%m-%d %H:%M:%S") - (j * 60)
+    
+    # Calculate travel time using r5r
+    travel_times <- travel_time_matrix(
+      r5r_core = r5r_core,
+      origins = one_row_test[one_row_test$coord_type == "home_tract_lat_lon", ],
+      destinations = one_row_test[one_row_test$coord_type == "school_lat_lon", ],
+      mode = mode,
+      max_walk_time = 150,
+      departure_datetime = departure_time,
+      # verbose = TRUE
+    ) %>% 
+      mutate(departure_time = departure_time,
+             on_time = travel_time_p50 <= as.numeric(difftime(as.POSIXct(paste(date, one_row_test[1,]$latest_arrival), format = "%Y-%m-%d %H:%M:%S"), departure_time, units = "mins")))
+    
+    # if travel_times is empty, return a departure time an hour before the am bell 
+    
+    if(nrow(travel_times) == 0) {
+      departure_time_broken <- as.POSIXct(paste(date, one_row_test[1,]$am_bell), format = "%Y-%m-%d %H:%M:%S") - (60 * 60)
+      
+      latest_departure_time[[i]] <- departure_time_broken
+    } else
+    
+    # Check if the student can arrive on time
+    if(travel_times$on_time == TRUE & nrow(travel_times > 0)) {
+      
+      # if the arrival is on time, store the departure time and join the data with school data
+      latest_departure_time <- departure_time
+      
+      travel_times_list[[i]] <-
+        travel_times %>% 
+        left_join(school_join_object, by = c("to_id" = "id"))
+      
+      
+    } else {
+      # If arrival time is too late, change the departure time to the next possible time in our sequence and start the loop again
+      print(departure_time)
+      # travel_times$departure_date <- latest_departure_time
+      break
+    }
+  }
+
+# Store the result
+latest_departure_times[[i]] <- latest_departure_time
+
+print(paste("Iteration", i, "complete.", "Latest departure time:", latest_departure_time))
+
+
+
+gc()
+
+}
+
+# writing some placeholder code to handle the route combos that are stilll not working for us.
+# in "latest_departure_times_quick_fix" we'll assume a departure time of 1 hour before the am bell
+# "latest_departure_times_fucked" will be used to store the rows that are causing us trouble
+
+# fucked_up_iterations %>% 
+#   write_csv("data/output/fucked_up_iterations_01_14.csv")
+# 
+# latest_departure_times %>% 
+#   write_rds("data/setup/latest_departure_times_not_real_combos.rds")
+# 
+# travel_times_list %>% 
+#   write_rds("data/setup/travel_times_list_not_real_combos.rds")
+
+
+travel_times_from_student_home_tracts <- 
+  travel_times_list %>% 
+  bind_rows()  %>% 
+  mutate(arrival_time = departure_time + travel_time_p50 * 60) 
+
+departure_times_
+  
+
+# latest_departure_times_fucked <- 
+#   latest_departure_times %>% 
+#   lapply(
+#     # when an iteration has a length greater than 1, return an NA
+#     function(x) if(length(x) > 1) NA else x
+#   )
+# 
+
+
+
+latest_leaving_times_for_detailed_routing <- 
+  travel_times_from_student_home_tracts %>% 
+  mutate(prog_no = as.character(prog_no),
+         from_id = str_remove_all(from_id, "x")
+         # # convert arrival and departure times to EST
+         # arrival_time = as.POSIXct(arrival_time, tz = "UTC") - hours(4),
+         # departure_time = as.POSIXct(departure_time, tz = "UTC") - hours(4)
+         ) %>% 
+  left_join(school_info_join, 
+            by = c(
+              "prog_no" = "prog_no"
+            ))  %>% 
+  left_join(missing_student_home_tracts_with_bell_times,
+            by = c(
+              "from_id" = "census_tract",
+              "prog_no" = "prog_no",
+              "grades" = "grades",
+              "name" = "name",
+              "type" = "type",
+              "bldg_num" = "bldg_num",
+              "program" = "program",
+              "am_bell" = "am_bell",
+              "pm_bell" = "pm_bell"
+            ))  %>%
+    rename(census_tract = from_id) %>% 
+  mutate(id = row_number()) %>% 
+    dplyr::select(prog_no,
+                  departure_time,
+                  arrival_time,
+                  program,
+                  name,
+                  census_tract,
+                  # students,
+                  bldg_num,
+                  grades,
+                  type,
+                  # coord_type,
+                  # id,
+                  # lat,
+                  # lon,
+                  am_bell,
+                  pm_bell,
+                  school_point_lat,
+                  school_point_lon,
+                  tract_point_lat,
+                  tract_point_lon,
+                  geometry.x) %>% 
+  rename(geometry = geometry.x) 
+
+latest_leaving_times_for_detailed_routing %>% 
+  write_rds("data/setup/latest_leaving_times_for_detailed_routing_not_real.rds")
+```
+
+```{r}
+# Define modes of transit that we'll give our commuters access to 
+mode <- c("WALK", "TRANSIT") 
+i = 1
+
+
+for(i in 1:nrow(latest_leaving_times_for_detailed_routing)){
+  
+  one_row <- latest_leaving_times_for_detailed_routing[i,]
+  
+  one_row_test <-
+  one_row %>% 
+    mutate(school_lat_lon = paste0(school_point_lat, ",", school_point_lon),
+           home_tract_lat_lon = paste0(tract_point_lat, ",", tract_point_lon)) %>% 
+    pivot_longer(
+      cols = c("home_tract_lat_lon", "school_lat_lon"),
+      names_to = "coord_type",
+      values_to = "coord") %>% 
+    mutate(id = ifelse(
+      coord_type == "home_tract_lat_lon", 
+      janitor::make_clean_names(census_tract), 
+      str_replace_all(stringr::str_to_lower(program), " ", "_"))
+      ) %>% 
+    mutate(lat = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][1])),
+           lon = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][2]))) %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+    mutate(geometry = st_make_valid(geometry)) %>% 
+    # re-separate lat and lon
+    mutate(lat = st_coordinates(geometry)[, 2],
+           lon = st_coordinates(geometry)[, 1]) %>%
+    dplyr::select(prog_no,
+                  program,
+                  name,
+                  census_tract,
+                  # students,
+                  bldg_num,
+                  grades,
+                  type,
+                  coord_type,
+                  id,
+                  lat,
+                  lon,
+                  am_bell,
+                  pm_bell)
+  
+  # make detailed routes directory inside of today's poa folder
+  dir.create(here::here("data/poa", today, "detailed-routes_not_real"), showWarnings = F)
+
+  df <- 
+    detailed_itineraries(
+      r5r_core,
+      origins = one_row_test[1,],
+      destinations = one_row_test[2,],
+      mode = mode,
+      departure_datetime = one_row$departure_time,
+      shortest_path = T,
+      output_dir = here::here("data/poa", today, "detailed-routes_not_real")
+      )
+  
+  gc()
+  
+  Sys.sleep(0.1)
+  
+}
+
+```
+
+# Read each csv file into a list of dataframes
+
+```{r}
+# read in the csv files
+
+file_path <- here::here("data/poa", today, "detailed-routes_not_real")
+
+file_paths <- list.files(here::here(file_path), full.names = T) %>% unique
+
+df_list <- list()
+
+df_list <- lapply(file_paths, read_csv)
+```
+
+```{r}
+school_list <-
+  df_list %>% 
+  # mutate all from_id and to_id to character
+  map(~mutate(.x, from_id = as.character(from_id), to_id = as.character(to_id))) %>%
+  map(~mutate(.x, to_id = map_chr(to_id, ~str_remove_all(.x, "stop:")))) %>% 
+  map(~mutate(.x, to_lat = as.character(to_lat), to_lon = as.character(to_lat))) %>% 
+  map(~mutate(.x, departure_time = as.character(departure_time))) %>%
+  map(~mutate(.x, total_distance = as.numeric(total_distance))) %>% 
+  map(~mutate(.x, mode = as.character(mode))) %>% 
+  map(~mutate(.x, wait = as.numeric(wait))) %>%
+  bind_rows() %>% 
+  group_by(from_id, to_id) %>%
+  mutate(route = row_number()) 
+
+geom <- school_list %>% 
+  head(2) %>% 
+  .$geometry
+
+school_list %>% 
+  st_as_sf(sf_column_name = "geometry")
+
+school_list$geometry <- st_as_sfc(school_list$geometry)
+
+school_list %>% 
+  st_as_sf(crs = 4326) %>% 
+  st_write(here::here("data/poa", today, "every_leg_every_trip.shp"))
+
+school_list %>% 
+  # filter(from_id == "x24510280302",
+  #        to_id == "mer-vo_h") %>% 
+  st_as_sf(crs = 4326) %>% 
+  mapview(zcol = "mode") +
+  mapview(baltimore_grid_sampled) +
+  mapview(bmore_tracts_no_parks, alpha.regions = 0.2) +
+  # add school shapes 
+  mapview(hs_parcels_buffer, col.regions = "red") 
+
+```
+

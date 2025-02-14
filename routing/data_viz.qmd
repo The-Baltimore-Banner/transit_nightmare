@@ -1,0 +1,35 @@
+---
+title: "Data Viz"
+editor: visual
+---
+
+
+
+```{r}
+morning_otp_by_line <- 
+  read_csv("/Users/greg.morton/Documents/baltimoreBanner/Projects/2024/high_school_transportation_otp/data/output/morning_otp_by_line_01_16.csv") %>% 
+  filter(!is.na(on_time_perc)) 
+
+most_popular_routes <- 
+  read_csv("data/output/most_popular_routes_01-17.csv")
+
+```
+
+```{r}
+most_popular_routes %>% 
+  left_join(morning_otp_by_line, by = c("name" = "route_name")) %>% 
+  filter(!is.na(n_days)) %>% 
+ dplyr::select(
+    name,
+    short_name,
+    total_students,
+    on_time_perc,
+    on_time_perc_5,
+    mean_headway,
+    color
+  ) %>% 
+  mutate(color = str_c("#", color)) %>% 
+  View()
+  
+
+```

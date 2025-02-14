@@ -1,0 +1,473 @@
+---
+title: "Are There Enough Buses?"
+editor: visual
+---
+
+# which lines are most important to which schools? Which lines are ending up at schools in the morning?
+
+```{r}
+school_hours_stops <- final_schedule_object %>% 
+  filter(
+    hour.y==6|
+      hour.y==7|
+      hour.y==8|
+      (hour.y==14&minute.y>20)|
+      (hour.y==15)|(hour.y==16)
+           ) 
+```
+
+```{r}
+# create left-join-able version of the stops object 
+D_school_parcels <- st_read("data/shapes/school_parcels/school_parcels.geojson") %>% 
+  distinct(.keep_all = T) %>%
+  mutate(schools_at_parcel = 
+           case_when(
+             schools_at_parcel == "Crossroads School, The" ~ "The Crossroads School",
+             schools_at_parcel == "Belair-Edison School, The" ~ "The Belair-Edison School",
+             schools_at_parcel == "Dallas F. Nicholas, Sr., Elementary School" ~ "Dallas F. Nicholas Sr. Elementary School",
+             schools_at_parcel == "Green School Of Baltimore, The" ~ "The Green School Of Baltimore",
+             schools_at_parcel == "Reach! Partnership School, The" ~ "The Reach! Partnership School",
+             schools_at_parcel == "Dr. Bernard Harris, Sr., Elementary School" ~ "Dr. Bernard Harris Sr. Elementary School",
+             schools_at_parcel == "Historic Samuel Coleridge-Taylor Elementary School, The, Joseph C. Briscoe Academy" ~ "The Historic Samuel Coleridge-Taylor Elementary School, The Joseph C. Briscoe Academy",
+             TRUE ~ schools_at_parcel
+           )) %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326)
+
+
+transformed_df <- data.frame()
+
+# Iterate through each row of the sf object
+for (i in 1:nrow(D_school_parcels)) {
+  # Split the schools_at_parcel column by comma
+  schools <- strsplit(as.character(D_school_parcels[i, "schools_at_parcel"]), ", ")[[1]]
+  
+  # Create a new row for each school listed
+  for (school in schools) {
+    # Duplicate the row and update the school_name column
+    new_row <- D_school_parcels[i, ]
+    new_row$school_name <- school
+    
+    # Add the new row to the transformed dataframe
+    transformed_df <- rbind(transformed_df, new_row)
+  }
+}
+
+D_school_parcels <- transformed_df 
+
+
+#create buffer around schools
+# this is used to calculate the distance between buses and schools
+# "r_2_m" is the distance we use to create the buffer around each school
+# "D_school_locs_buffer" is the school data with a buffer around each school
+r_2_m <- set_units(.5, "miles") 
+D_school_parcels_buff <- st_transform(D_school_parcels, 29902)
+D_school_parcels_buffer <-st_buffer(D_school_parcels_buff, r_2_m)
+
+
+# this gives us a map of all schools with a half mile buffer zone surrounding each 
+# the only thing we're doing below is correcting the CRS
+D_school_parcels_buffer_all <- st_transform(D_school_parcels_buffer, 4326)
+
+D_school_locs <- st_read("data/shapes/city_schools/Baltimore_City_Schools.shp") %>% 
+  st_transform(4326) %>% 
+  st_set_crs(4326)
+
+
+
+
+# filter parcels down to high schools: 
+hs_locs_join <- 
+  D_school_locs %>% 
+  filter(str_detect(class, "9 - 12|6 - 12|6 - 8|5 - 8")) %>% 
+  mutate(join_addr = str_to_lower(address), 
+  ) 
+
+
+hs_locs_join_df <- 
+  hs_locs_join %>% 
+  as.data.frame()
+
+hs_parcels_buffer <- 
+  D_school_parcels %>%
+  st_join(hs_locs_join) %>%
+  dplyr::select(school_name, name, join_addr, fulladdr) %>% 
+  filter(!is.na(name)) %>% 
+  distinct(name, .keep_all = T) %>% 
+  as.data.frame() %>% 
+  left_join(hs_locs_join_df,
+            by = c(name = "name")) %>% 
+  filter(str_detect(class, "9 - 12|6 - 12|6 - 8|5 - 8")) %>% 
+  st_as_sf() %>%
+  st_transform(29902) %>% 
+  st_buffer(r_2_m) %>% 
+  st_transform(4326) 
+
+
+# join df for hs parcels (we just need school number from here )
+hs_parcel_join <- 
+  hs_parcels_buffer %>% 
+  as.data.frame() %>% 
+  mutate(school_number = as.character(prg_num))
+
+D_stops <- read_csv("data/setup/Baltimore_Region_Public_Transit_(stops).csv") %>% 
+  filter(is.na(X)==FALSE, is.na(Y)==FALSE, Jurisdiction == "Baltimore City") %>% 
+  st_as_sf(coords = c("X","Y")) %>% 
+  st_set_crs(2248) %>%
+  st_transform(4326) %>% 
+  st_set_crs(4326)
+
+
+D_school_stop_cens_j<- D_stops %>% 
+  dplyr::filter(str_detect(str_to_upper(TYPE_Alt), "BUS")) %>%
+  # next join to the map of all schools and their buffer zones
+  st_join(hs_parcels_buffer)
+  # filter for high schools
+  # filter(class%in%c("9 - 12"))%>% 
+  # select relevant variables
+
+# for join
+D_school_stop_cens_j_join<- D_stops %>% 
+  dplyr::filter(str_detect(str_to_upper(TYPE_Alt), "BUS")) %>%
+  # next join to the map of all schools and their buffer zones
+  st_join(hs_parcels_buffer) %>% 
+  mutate(Stop_Number = as.character(Stop_Number)) %>%
+  # filter for high schools
+  # filter(class%in%c("9 - 12"))%>%
+  # select relevant variables 
+  dplyr::select(Stop_Number, Stop_Name, school_name, name) %>% 
+  as.data.frame()
+
+which_stops_which_school <- 
+  D_school_stop_cens_j %>% 
+  group_by(Stop_Number) %>% 
+  summarise(name = list((name))
+            ) %>% 
+  as.data.frame()
+
+hs_parcels <- 
+    D_school_parcels %>% 
+  st_join(hs_locs_join) %>%
+  dplyr::select(school_name, name, join_addr, fulladdr) %>% 
+  filter(!is.na(name)) %>% 
+  distinct(name, .keep_all = T) %>% 
+  as.data.frame() %>% 
+  left_join(hs_locs_join_df,
+            by = c(name = "name")) %>% 
+  filter(str_detect(class, "9 - 12|6 - 12|6 - 8|5 - 8")) %>% 
+  st_as_sf() %>%
+  st_transform(4326) 
+
+
+```
+
+```{r}
+
+# join with bus stops 
+D_bus_locs_hours_near_stops <- 
+  school_hours_stops %>% 
+  mutate(stop_id = as.character(stop_id)) %>%
+  # join to the map of all bus stops and their buffer zones
+  left_join(D_school_stop_cens_j_join, by = c("stop_id" = "Stop_Number")) %>% 
+  # filter out any bus locations that aren't near a bus stop 
+  filter(is.na(name)==FALSE) %>% 
+  filter(is.na(school_name)==FALSE)
+
+
+D_bus_locs_hours_near_stops_school<-
+  D_bus_locs_hours_near_stops %>% 
+  # turn it into a df 
+  data.frame %>% 
+  # join to dataframe of bus stops near schools
+  # left_join(D_school_stop_cens_j, by = "Stop_Number") %>%
+  # mutate(time_reported_et = with_tz(time_reported_et, "America/New_York")) %>% 
+  # mutate exact date, and time buckets (either morning or afternoon)
+  mutate(
+    # date = str_c(year, "-", month, "-", day_of_month) %>% ymd,
+         time = case_when(hour.y%in%c(14,15,16)~"afternoon",
+                          hour.y%in%c(6,7,8)~"morning"))%>% 
+  # join to school enrollment data
+  # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>% 
+  # join to school start and stop times
+  left_join(sst_new, by = c("name"="name")) %>% 
+  filter(!is.na(am_bell) | !is.na(pm_bell)) %>% 
+  ungroup %>% 
+  filter(!is.na(hour) | !is.na(minute)) %>% 
+  # mutate the exact time of the bus location and turn the bell times into hms objects
+  mutate(
+    bus_hour = as_hms(timestamp),
+    closing_bell = as_hms(pm_bell),
+    opening_bell = as_hms(am_bell),
+    # create a variable that tells us if the bus location is near a school right before or right after the bell (1 hour)
+    keep_filt = 
+      case_when(
+        time =="afternoon"&
+          (bus_hour>closing_bell)&
+          (bus_hour<(closing_bell+ as_hms("01:00:00")))~TRUE,
+        time=="morning"&
+          (bus_hour<opening_bell)&
+          (bus_hour>(opening_bell- as_hms("01:00:00")))~TRUE)
+    ) %>% 
+  # filter out missing times (which presumably happen as a result of broken sensors?)
+  filter(is.na(timestamp)==FALSE) %>% 
+  # filter out times we don't care about 
+  filter(is.na(keep_filt)==FALSE) %>% 
+  st_as_sf() %>%
+  # join to hs parcel
+  st_join(hs_parcels_buffer) %>%
+  # make sure the name of the school associated with the bus stop is the same as the name of the school associated with the buffer zone
+  filter(name.x == name.y) %>%
+  dplyr::select(-name.y) %>% 
+  rename(name = name.x) 
+
+
+
+
+
+
+```
+
+From there we count total number of buses that passed through each school's buffer zone on a given day
+
+```{r}
+  # start with the df we just created 
+D_bus_locs_hours_near_stops_school_2<-D_bus_locs_hours_near_stops_school%>% 
+  # filter for buses that arrived right before or right after school
+  filter(is.na(keep_filt)==FALSE) %>% 
+  # group by year, month, day, hour, school, and bus number
+  group_by(service_date, hour.y, name, id, 
+           # route, 
+           trip_id, school_number) %>% 
+  # count the number of buses that arrived right before or right after school
+  summarise(n = n()) %>% 
+  ungroup %>%
+  # group by year, month, day, hour, and school
+  group_by(service_date, hour.y, name, school_number) %>% 
+  summarise(n = n()) 
+# final DF is a list of the number of buses that arrived right before or right after school at each school on each day
+
+```
+
+Here, we're adding some additional context to the data. We're adding the exact date and time buckets (either morning or afternoon) to the data.
+
+We also re-join start/stop times
+
+```{r}
+# begin with the df we just created
+D_bus_locs_hours_near_stops_school_3<-D_bus_locs_hours_near_stops_school_2 %>%
+  # join to start/stop times for additional context
+  left_join(sst_new, by = c("name"="name")) %>% 
+  # mutate the exact date and time buckets (either morning or afternoon)
+  # mutate(hour = as_factor(hour))
+  mutate(
+    # date = str_c(year, "-",month,"-",day_of_month) %>% ymd,
+         time = case_when(hour.y%in%c(14,15,16)~"afternoon",
+                          hour.y%in%c(6,7,8)~"morning")
+  )
+
+D_bus_locs_hours_near_stops_school_3 %>% 
+  # filter(name == "Mergenthaler Vocational-Technical High") %>%
+  mapview(zcol = "name", legend = F) + 
+  mapview(hs_parcels_buffer, col.region = "yellow", zcol = "name", legend = F)
+  
+  # join to school enrollment data
+  # left_join(school_enrollments, by = c("name"="school_name_tracts"))
+# final df is much the same as "D_bus_locs_hours_near_stops_school_2" but with additional context
+
+
+```
+
+Now we're going to group by school, date, and time of day. We'll calculate the average number of buses that arrived right before or right after school at each school on each day.
+
+```{r}
+#holidays and weekends to remove
+all_holidays <- 
+  c("2017-09-04", "2017-09-21", "2017-09-22", "2017-10-09",
+    "2017-11-10", "2017-11-23", "2017-11-24", "2017-12-22",
+    "2017-12-25", "2017-12-26", "2017-12-27", "2017-12-28",
+    "2017-12-29", "2018-09-03", "2018-09-10", "2018-09-19",
+    "2018-09-20", "2018-11-12", "2018-11-22", "2018-11-23",
+    "2018-12-24", "2018-12-25", "2018-12-26", "2018-12-27",
+    "2018-12-28", "2018-12-31", "2019-09-02", "2019-09-30",
+    "2019-10-01", "2019-10-09", "2019-10-14", "2019-11-11",
+    "2019-11-27", "2019-11-28", "2019-11-29", "2019-12-23",
+    "2019-12-24", "2019-12-25", "2020-01-01", "2020-01-20",
+    "2020-02-17", "2020-04-10", "2020-05-25", "2020-06-05",
+    "2020-06-11", "2020-06-12", "2020-06-15", "2020-06-16",
+    "2020-06-17", "2020-06-18", "2020-06-19", "2021-01-01",
+    "2021-01-18", "2021-02-15", "2021-04-02", "2021-05-31",
+    "2021-06-18", "2021-06-21", "2021-06-22", "2021-06-23",
+    "2021-06-24", "2021-06-25", "2022-01-17", "2022-02-21",
+    "2022-04-15", "2022-05-30", "2022-06-17", "2022-06-20",
+    "2022-06-21", "2022-06-22", "2022-06-23", "2022-06-24",
+    "2022-09-05", "2022-11-11", "2022-11-24", "2022-11-25",
+    "2023-01-01", "2023-01-07", "2023-01-08", "2023-01-14",
+    "2023-01-15", "2023-01-21", "2023-01-22", "2023-01-28",
+    "2023-01-29", "2023-02-04", "2023-02-05", "2023-02-11",
+    "2023-02-12", "2023-02-18", "2023-02-19", "2023-02-25",
+    "2023-02-26", "2023-03-04", "2023-03-05", "2023-03-11",
+    "2023-03-12", "2023-03-18", "2023-03-19", "2023-03-25",
+    "2023-03-26", "2023-04-01", "2023-04-02", "2023-04-08",
+    "2023-04-09", "2023-04-15", "2023-04-16", "2023-04-22",
+    "2023-04-23", "2023-04-29", "2023-04-30", "2023-05-06",
+    "2023-05-07", "2023-05-13", "2023-05-14", "2023-05-20",
+    "2023-05-21", "2023-05-27", "2023-05-28", "2023-06-03",
+    "2023-06-04", "2023-06-10", "2023-06-11", "2024-09-02",
+    "2024-10-18", "2024-11-04", "2024-11-05"
+    ) %>% 
+  ymd() %>% as_date
+
+breaks <- c(ymd("2017-03-24"):ymd("2017-04-03"), ymd("2017-06-16"):ymd("2017-09-05"),
+            ymd("2018-03-30"):ymd("2018-04-06"), ymd("2018-06-15"):ymd("2018-09-04"),
+            ymd("2019-04-19"):ymd("2019-04-26"), ymd("2019-06-14"):ymd("2019-09-03"),
+            ymd("2020-04-06"):ymd("2020-04-13"), ymd("2020-06-15"):ymd("2020-09-08"),
+            ymd("2021-03-26"):ymd("2021-04-05"), ymd("2021-06-21"):ymd("2021-09-08"),
+            ymd("2022-04-15"):ymd("2022-04-22"), ymd("2022-06-20"):ymd("2022-09-06"),
+            ymd("2022-12-22"):ymd("2023-01-04"), ymd("2024-11-27"):ymd("2024-11-30")
+            ) %>% 
+  as_date()
+
+to_rm <- c(all_holidays, breaks) %>% as_date
+
+
+
+# begin with the df we just created
+D_bus_locs_timep_near_school<-D_bus_locs_hours_near_stops_school_3 %>%
+  # group by school, date, and time (here, we group by time of day rather than hour)
+  group_by(name, service_date, time, school_number.x, school_number.y) %>% 
+  # count the number of buses that arrived right before or right after school
+  summarise(
+    n = sum(n)
+    # enroll = Enrollment.x[1]
+  ) 
+  # mutate exact date
+  # mutate(date = str_c(year, "-",month,"-",day_of_month) %>% ymd) %>% 
+  # filter out days with no school 
+  # filter(!(service_date %in% to_rm)) %>%
+  # filter out missing times 
+  # filter(is.na(time)==FALSE)
+
+```
+
+```{r}
+# finally, we group by school and time of day and calculate the average number of buses that arrived right before or right after school
+D_school_times_num_bus_avg<-
+  D_bus_locs_timep_near_school%>% 
+  group_by(name, time, school_number.x, school_number.y) %>% 
+  summarise(
+    avg_n = mean(n),
+    max_n = max(n),
+    min_n = min(n),
+    median_n = median(n),
+    sd_n = sd(n),
+    min_day = min(as.Date(service_date)),
+    max_day = max(as.Date(service_date)),
+    sd_as_pct_of_total_stops = sd(n)/mean(n)*100
+    # enroll = enroll[1]
+  ) %>% 
+  pivot_wider(
+    names_from = time,
+    values_from = c(avg_n, max_n, min_n, median_n, sd_n, min_day, max_day, sd_as_pct_of_total_stops)
+  ) %>% 
+  group_by(name) %>% 
+  summarise(across(everything(), ~mean(.x, na.rm = T)))  %>% 
+  dplyr::select(-school_number.x, -school_number.y, -max_day_afternoon, -min_day_afternoon) %>%
+  rename(max_date = max_day_morning,
+         min_date = min_day_morning) %>%
+  dplyr::select(name,  min_date, max_date, everything()) %>% 
+  as.data.frame() 
+  # dplyr::select(-where_is_bus_stopped)
+
+D_school_times_num_bus_avg %>% 
+  st_drop_geometry(geometry.x) %>% 
+  dplyr::select(-geometry.x) %>% 
+  write_csv("data/output/bus_arrivals_by_school_through_10_02.csv")
+
+
+
+
+
+```
+
+```{r}
+
+arrivals_by_line <- D_bus_locs_hours_near_stops_school%>% 
+  # filter for buses that arrived right before or right after school
+  filter(is.na(keep_filt)==FALSE) %>% 
+  mutate(day_of_month = lubridate::day(timestamp),
+         month = lubridate::month(timestamp),
+         year = lubridate::year(timestamp)) %>%
+  # group by year, month, day, hour, school, and bus number
+  group_by(year, month, day_of_month,name, id, time,
+           route_id,
+           trip_id, school_number) %>% 
+  # count the number of buses that arrived right before or right after school
+  summarise(n = n()) %>% 
+  ungroup %>%
+  # group by year, month, day, hour, and school
+  group_by(
+    service_date,
+    # year, month, day_of_month, 
+           name, time,
+           route_id,
+           school_number) %>% 
+  # summarise(n = n()) %>% 
+    summarise(
+    avg_n = mean(n),
+    max_n = max(n),
+    min_n = min(n),
+    median_n = median(n),
+    sd_n = sd(n),
+    min_day = min(as.Date(service_date)),
+    max_day = max(as.Date(service_date)),
+    sd_as_pct_of_total_stops = sd(n)/mean(n)*100
+    # enroll = enroll[1]
+  ) %>% 
+  left_join(mta_routes, by = c("route_id" = "id")) %>% 
+  dplyr::select(route_id, short_name, long_name, everything(), -color, -text_color, -type) 
+
+
+arrivals_by_line
+
+arrivals_by_line %>% 
+  filter(str_detect(name.x, "Western")) %>% 
+  mapview(zcol = "short_name")
+```
+
+On which lines are students starting their trips?
+
+```{r}
+
+student_tract_summaries <- 
+  student_home_tracts_23 %>% 
+  filter(str_detect(grades, "9 - 12|6 - 12|6 - 8|5 - 8")) %>% 
+  group_by(census_tract) %>% 
+  summarise(students = sum(students),
+            n_schools = n_distinct(name),
+            school_names = list(name),
+            tract_point = unique(tract_point))
+
+
+routes_tracts_crosswalk <- school_list %>% 
+  filter(!is.na(route)) %>% 
+  group_by(from_id, to_id) %>% 
+  filter(segment == min(segment)) %>% 
+  mutate(route = as.character(route)) %>%
+  left_join(all_routes, by = c("route" = "id")) %>% 
+  ungroup() %>% 
+  group_by(route, short_name, from_id) %>% 
+  summarise(n = n()) %>% 
+  mutate(from_id = str_remove_all(from_id, "x")) %>% 
+  left_join(student_tract_summaries, by = c("from_id" = "census_tract")) %>%
+  dplyr::select(route, short_name, from_id, n, students, n_schools, school_names, tract_point) %>% 
+  arrange(from_id) %>% 
+  group_by(from_id) %>% 
+  mutate(pct_routes = n / sum(n) * 100) %>%
+  rename(n_routes = n) %>% 
+  ungroup() %>%
+  dplyr::select(from_id, route, short_name, n_routes, pct_routes, students, n_schools, school_names, tract_point) 
+
+routes_tracts_crosswalk %>% 
+  st_as_sf(crs = 4326) %>%
+  mapview()
+```
