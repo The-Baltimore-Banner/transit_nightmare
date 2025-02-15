@@ -6,6 +6,8 @@ packrat/src/
 .RData
 .Rhistory
 !functions
-
+getting_to_school.RProj
+_quarto.yml
+.Rprofile
 /.quarto/
 Data/
