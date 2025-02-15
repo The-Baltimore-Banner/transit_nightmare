@@ -1,13 +1,22 @@
+# Editor and System Files
 *.vim
 .DS_Store
-packrat/lib*/
-packrat/src/
 .Rproj.user
 .RData
 .Rhistory
-!functions
-getting_to_school.RProj
-_quarto.yml
 .Rprofile
+
+# R Project and Quarto Files
+getting_to_school.RProj
 /.quarto/
+packrat/lib*/
+packrat/src/
+
+# Ignore Quarto Cache and Build Files (but keep configuration)
+!.quarto.yml
+
+# Ignore Data Directory (modify if you want to keep specific data files)
 Data/
+
+# Always Track Functions Directory
+!functions
