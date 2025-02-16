@@ -40,11 +40,20 @@ summary_afternoon_otp %>%
 
 Certain bus lines are more problematic than others. On the No. 22 line, for example, 1 in 3 buses is too early or late, The Banner’s analysis found. As many as 3,300 students who attend 33 different schools may ride that line for at least part of their journey.
 ```{r}
+morning_otp_line <- 
+  read_rds("data/output/morning_otp_by_line_02_14.rds")
 
+morning_otp_line %>% 
+  filter(str_detect(route_name, "22"))
 ```
 
 Digital Harbor, for instance, enrolls more than 1,500 kids who don’t live close enough to walk. The 20 buses, on average, that stop within half a mile of the school each morning can only fit 1,200 kids — and that’s if no one but students ride them.
 ```{r}
 
+are_there_enough_buses <- 
+  read_rds("data/output/are_there_enough_buses_within_30_02_14.rds")
+
+are_there_enough_buses %>% 
+  filter(str_detect(name, "Digital"))
 
 ```

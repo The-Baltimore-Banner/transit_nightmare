@@ -420,6 +420,7 @@ summary_afternoon_otp <-
     median_headway = median(median_headway)
   ) 
 
+
 summary_afternoon_otp %>% 
   write_csv("data/output/afternoon_otp_02_12.csv")
 
@@ -496,7 +497,7 @@ for(i in dates_for_processing) {
       median_observed = median(observed_pct),
       on_time_perc = mean(on_time, na.rm = T),
       on_time_perc_5 = mean(on_time_5, na.rm = T),
-      on_time_perc_3 = mean(on_time_3, na.rm = T),
+      on_time_perc_4 = mean(on_time_4, na.rm = T),
       optimistic_on_time_perc = mean(optimistic_on_time, na.rm = T),
       pessimistic_on_time_perc = mean(pessimistic_on_time, na.rm = T),
       headway_adherence = mean(headway_adherence, na.rm = T),
@@ -548,17 +549,20 @@ morning_otp_line <-
     median_observed = median(median_observed),
     on_time_perc = mean(on_time_perc),
     on_time_perc_5 = mean(on_time_perc_5),
-    on_time_perc_3 = mean(on_time_perc_3),
+    on_time_perc_4 = mean(on_time_perc_4),
     optimistic_on_time_perc = mean(optimistic_on_time_perc),
     pessimistic_on_time_perc = mean(pessimistic_on_time_perc),
     # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway, na.rm = T)
   ) %>% 
-  left_join(route_id_crosswalk, by = c("route_name" = "name"))
-  write_csv("data/output/morning_otp_by_line_01_28.csv")
+  left_join(route_id_crosswalk, by = c("route_name" = "name")) %>% 
+  arrange(on_time_perc)
 
-afternoon_otp_ <- 
+morning_otp_line %>% 
+  write_rds("data/output/morning_otp_by_line_02_14.rds")
+
+afternoon_otp_line <-
   afternoon_otp_by_line %>% 
   group_by(route_name) %>% 
   summarise(
@@ -571,14 +575,18 @@ afternoon_otp_ <-
     median_observed = median(median_observed),
     on_time_perc = mean(on_time_perc),
     on_time_perc_5 = mean(on_time_perc_5),
-    on_time_perc_3 = mean(on_time_perc_3),
+    on_time_perc_4 = mean(on_time_perc_4),
     optimistic_on_time_perc = mean(optimistic_on_time_perc),
     pessimistic_on_time_perc = mean(pessimistic_on_time_perc),
     # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway, na.rm = T)
   ) %>% 
-  left_join(route_id_crosswalk, by = c("route_name" = "name")) 
+  left_join(route_id_crosswalk, by = c("route_name" = "name")) %>% 
+  arrange(on_time_perc)
+
+afternoon_otp_line
+
   write_csv("data/output/afternoon_otp_by_line_01_28.csv")
 
 
