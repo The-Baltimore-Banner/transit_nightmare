@@ -20,6 +20,16 @@ Our final determination: Baltimore’s public transit makes it impossible for mi
 
 Read the story:
 
+<a id="data"></a>
+
+## Data 
+
+[Download the data folder for this project here](). Make sure that you put it in the root directory of this repo. This folder contains many of the pieces that you'll need to recreate the analysis from scratch, as well as the results from our work.
+
+[Download live bus position data here](https://s3-tbb-data-dev.s3.us-east-1.amazonaws.com/school-transportation-public/bus-positions.tar.xz). You will need about 350 GB of local hard drive space for this. We recommend storing this on your desktop to avoid changing some of the filepaths in this repo.
+
+The analysis also involves downloading data from two external sources: the U.S. Census Bureau (via the tidycensus package) and the MTA (via the Swiftly API). Both will require that you obtain an API key.
+
 
 <a id="method"></a>
 

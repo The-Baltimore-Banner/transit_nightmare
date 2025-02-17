@@ -3,7 +3,8 @@ title: "Routing fact check"
 editor: visual
 ---
 
-# setup 
+# setup
+
 ```{r}
 library(tidycensus)
 library(tidyverse)
@@ -19,7 +20,8 @@ options(scipen = 999)
 
 ```
 
-When everything runs on time, the average city student’s trip to school on mass transit takes 40 minutes...
+When everything runs on time, the average city student’s trip to school on mass transit takes about 40 minutes...
+
 ```{r}
 trip_summaries <- 
   read_rds("data/output/trip_summaries_weighted_01_17.rds") 
@@ -28,12 +30,15 @@ trip_summaries
 ```
 
 ...twice as long as neighboring Baltimore County students spend on yellow buses...
+
 ```{r}
 source("routing/baltco_bus_routes.R")
 
 am_routes_summary
 ```
-# ...and longer than the average adult’s commute to work. 
+
+...and longer than the average adult’s commute to work.
+
 ```{r}
 # Set your Census API key
 # census_api_key("your_api_key_here", install = TRUE)
@@ -59,6 +64,7 @@ adult_commute_data
 ```
 
 Meanwhile, in the past decade families have been migrating away from the city’s core neighborhoods with the greatest concentration of transit and toward the edges, according to an analysis of U.S. Census data by The Banner.
+
 ```{r}
 source("routing/children_movement_over_time.R")
 tracts_2010 %>% 
@@ -77,10 +83,10 @@ tracts_2023 %>%
 Today, their routes to school are longer and more complicated. Fifty-eight percent of trips to school involve transferring from one line to another. That means one late bus can prevent a student from catching a connecting bus
 
 (we're talking in terms of all routes here so we use unweighted trip summaries)
+
 ```{r}
 unweighted_trip_summaries <-
   read_rds("data/output/unweighted_trip_summaries_01_17")
 
 unweighted_trip_summaries
-
 ```

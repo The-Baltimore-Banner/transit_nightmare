@@ -4,6 +4,7 @@ editor: visual
 ---
 
 ## Setup
+
 ```{r}
 library(tidyverse)
 library(lubridate)
@@ -48,6 +49,7 @@ plan(multisession, workers = parallel::detectCores() - 1)
 ```
 
 # filter breaks and holidays out of our dates
+
 ```{r}
 # make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 12/02, excluding weekends 
 #holidays and weekends to remove
@@ -123,6 +125,7 @@ dates_for_processing <-
 ```
 
 # combine all schedules for a date
+
 ```{r}
 
 get_daily_schedule <- function(date = "2024-08-26") {
@@ -262,13 +265,6 @@ get_final_schedule <- function(date = "2024-08-26") {
 
 # final_schedule_object <- 
 #   get_final_schedule("2024-10-04")
-
-
-
-
-
-
-
 ```
 
 # Get OTP stats for our entire time period
