@@ -19,8 +19,6 @@ options(scipen = 999)
 
 ```
 
-When everything runs on time, the average city student’s trip to school on mass transit takes 40 minutes, twice as long as neighboring Baltimore County students spend on yellow buses and longer than the average adult’s commute to work. Most students who use transit to get to school have to transfer from one bus or light rail line to another, our analysis found.
-
 When everything runs on time, the average city student’s trip to school on mass transit takes 40 minutes...
 ```{r}
 trip_summaries <- 

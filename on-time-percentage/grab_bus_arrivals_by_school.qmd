@@ -35,9 +35,30 @@ library(future.apply)
 library(readxl)
 library(here)
 library(furrr)
-source("functions/mta_api_functions.R")
-source("routing/setup.R")
-source("routing/student_info.R")
+source("helpers/setup.R")
+source("functions/mta_api_functions_private.R")
+# sample of points within each traact
+baltimore_grid_sampled <-
+  st_read("data/shapes/bmore_grid_sampled_01_27.geojson") %>%
+  st_as_sf()
+# shapefile with tracts and geometries for each point 
+bmore_tracts_join <-
+  bmore_tracts %>%
+  clean_names() %>%
+  dplyr::select(geoid, name, geometry) %>%
+  rename(tract_name = name) %>%
+  st_as_sf() %>%
+  st_transform(4326) %>%
+  st_difference(parks) %>%
+  st_make_valid() %>%
+  mutate(
+    valid_geometry = st_make_valid(geometry),  # Ensure geometries are valid
+    tract_point = st_centroid(valid_geometry),  # Calculate the centroid of the land area,
+    tract_point_lat = st_coordinates(tract_point)[, 2],  # Extract the latitude of the centroid
+    tract_point_lon = st_coordinates(tract_point)[, 1]  # Extract the longitude of the centroid
+  )
+
+source("helpers/student_info.R")
 # turn off scientific notation 
 options(scipen = 999)
 
@@ -201,7 +222,7 @@ hs_parcels <-
 
 ```{r}
 # make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 12/02, excluding weekends 
-dates <- seq(as.Date("2024-12-03"), as.Date("2025-01-14"), by = "day") %>% 
+dates <- seq(as.Date("2024-08-26"), as.Date("2025-01-14"), by = "day") %>% 
   .[!weekdays(.) %in% c("Saturday", "Sunday")]
 
 hours_of_interest <- c("05", "06","07", "08", "09", "10", "11", "12", "13", "14", "15", "16")
@@ -581,7 +602,7 @@ dates_for_processing %>%
 
 ```{r}
 first_period_attendance_tabula <- 
-  read_csv("/Users/greg.morton/Documents/baltimoreBanner/Projects/2024/high_school_transportation/data/raw/tabula-MPIA Response - Liz Bowie - Baltimore Banner - Attendance Data.csv", col_names = FALSE) %>% 
+  read_csv("data/raw/tabula-MPIA Response - Liz Bowie - Baltimore Banner - Attendance Data.csv", col_names = FALSE) %>% 
   rename(
     school = X1,
     first_period = X2,
@@ -661,8 +682,6 @@ school_buffers <-
   ungroup() 
 
 
-school_buffers[4,] %>% .$school_buffered %>% mapview::mapview() +
-  school_buffers[4,] %>% .$tract_point %>% mapview::mapview() 
 
 
 school_buffers %>% 
@@ -748,7 +767,7 @@ read_and_combine_bus_arrivals <- function() {
   
 }
 
-all_bus_arrivals <- read_and_combine_bus_arrivals()
+all_bus_arrivals <- read_and_combine_bus_arrivals() 
 
 bus_arrivals_avg <- 
   all_bus_arrivals %>% 
@@ -828,8 +847,6 @@ are_there_enough_buses %>%
 # 
 
 
-
-  lm(capacity_25_morning ~ first_period, data = are_there_enough_buses) %>% summary()
 
 
 ```
