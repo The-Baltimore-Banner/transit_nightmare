@@ -36,7 +36,8 @@ library(readxl)
 library(here)
 library(furrr)
 source("helpers/setup.R")
-source("functions/mta_api_functions_private.R")
+# you are going to need an Swiftly API key for MTA data 
+source("functions/mta_api_functions.R")
 # sample of points within each traact
 baltimore_grid_sampled <-
   st_read("data/shapes/bmore_grid_sampled_01_27.geojson") %>%
@@ -132,9 +133,6 @@ D_school_locs <- st_read("data/shapes/city_schools/Baltimore_City_Schools.shp") 
   st_transform(4326) %>% 
   st_set_crs(4326)
 
-
-
-
 # filter parcels down to high schools: 
 hs_locs_join <- 
   D_school_locs %>% 
@@ -181,9 +179,6 @@ D_school_stop_cens_j<- D_stops %>%
   dplyr::filter(str_detect(str_to_upper(TYPE_Alt), "BUS")) %>%
   # next join to the map of all schools and their buffer zones
   st_join(hs_parcels_buffer)
-  # filter for high schools
-  # filter(class%in%c("9 - 12"))%>% 
-  # select relevant variables
 
 # for join
 D_school_stop_cens_j_join<- D_stops %>% 
@@ -191,9 +186,6 @@ D_school_stop_cens_j_join<- D_stops %>%
   # next join to the map of all schools and their buffer zones
   st_join(hs_parcels_buffer) %>% 
   mutate(Stop_Number = as.character(Stop_Number)) %>%
-  # filter for high schools
-  # filter(class%in%c("9 - 12"))%>%
-  # select relevant variables 
   dplyr::select(Stop_Number, Stop_Name, school_name, name) %>% 
   as.data.frame()
 
@@ -280,7 +272,6 @@ to_rm <- c(all_holidays, breaks) %>% as_date
 
 
 # filter them out of dates 
-
 dates_for_processing <- dates %>% 
   .[! . %in% to_rm] %>% 
   as.character()
@@ -320,16 +311,9 @@ grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
     D_bus_locs_hours_near_stops %>% 
     # turn it into a df 
     data.frame %>% 
-    # join to dataframe of bus stops near schools
-    # left_join(D_school_stop_cens_j, by = "Stop_Number") %>%
-    # mutate(time_reported_et = with_tz(time_reported_et, "America/New_York")) %>% 
-    # mutate exact date, and time buckets (either morning or afternoon)
     mutate(
-      # date = str_c(year, "-", month, "-", day_of_month) %>% ymd,
            time = case_when(hour.y%in%c(14,15,16)~"afternoon",
                             hour.y%in%c(6,7,8)~"morning"))%>% 
-    # join to school enrollment data
-    # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>% 
     # join to school start and stop times
     left_join(sst_new, by = c("name"="name")) %>% 
     filter(!is.na(am_bell) | !is.na(pm_bell)) %>% 
@@ -430,22 +414,14 @@ grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
     as.data.frame() 
   
   write_rds(D_school_times_num_bus_avg, here::here("data", "bus_arrivals", paste0("bus_arrivals-", date, ".rds")))
-  
-  
-  
-  
 }
 
+# un-comment when you're ready to run
 # dates_for_processing %>% 
 #   lapply(grab_bus_arrivals_by_school)
-
-
-
-
 ```
 
 ```{r}
-
 # grab bus arrivals 
 grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
   
@@ -476,16 +452,10 @@ grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
     D_bus_locs_hours_near_stops %>% 
     # turn it into a df 
     data.frame %>% 
-    # join to dataframe of bus stops near schools
-    # left_join(D_school_stop_cens_j, by = "Stop_Number") %>%
-    # mutate(time_reported_et = with_tz(time_reported_et, "America/New_York")) %>% 
-    # mutate exact date, and time buckets (either morning or afternoon)
     mutate(
       # date = str_c(year, "-", month, "-", day_of_month) %>% ymd,
            time = case_when(hour.y%in%c(14,15,16)~"afternoon",
                             hour.y%in%c(6,7,8)~"morning"))%>% 
-    # join to school enrollment data
-    # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>% 
     # join to school start and stop times
     left_join(sst_new, by = c("name"="name")) %>% 
     filter(!is.na(am_bell) | !is.na(pm_bell)) %>% 
@@ -524,9 +494,12 @@ grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
     # filter for buses that arrived right before or right after school
     filter(is.na(keep_filt)==FALSE) %>% 
     # group by year, month, day, hour, school, and bus number
-    group_by(service_date, hour.y, name, id, 
-             # route, 
-             trip_id, school_number) %>% 
+    group_by(service_date, 
+             hour.y, 
+             name,
+             id, 
+             trip_id, 
+             school_number) %>% 
     # count the number of buses that arrived right before or right after school
     summarise(n = n()) %>% 
     ungroup %>%
@@ -538,8 +511,6 @@ grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
   D_bus_locs_hours_near_stops_school_3<-D_bus_locs_hours_near_stops_school_2 %>%
     # join to start/stop times for additional context
     left_join(sst_new, by = c("name"="name")) %>% 
-    # mutate the exact date and time buckets (either morning or afternoon)
-    # mutate(hour = as_factor(hour))
     mutate(
       # date = str_c(year, "-",month,"-",day_of_month) %>% ymd,
            time = case_when(hour.y%in%c(14,15,16)~"afternoon",
@@ -571,7 +542,6 @@ grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
       min_day = min(as.Date(service_date)),
       max_day = max(as.Date(service_date)),
       sd_as_pct_of_total_stops = sd(n)/mean(n)*100
-      # enroll = enroll[1]
     ) %>% 
     pivot_wider(
       names_from = time,
@@ -594,12 +564,9 @@ grab_bus_arrivals_by_school <- function(date = "2024-08-26") {
 
 dates_for_processing %>%
   lapply(grab_bus_arrivals_by_school)
-
-
 ```
 
 # Load first period attendance data
-
 ```{r}
 first_period_attendance_tabula <- 
   read_csv("data/raw/tabula-MPIA Response - Liz Bowie - Baltimore Banner - Attendance Data.csv", col_names = FALSE) %>% 
@@ -662,96 +629,62 @@ first_period_attendance_all <-
       TRUE ~ school
     )
   )
-
 ```
 
 How many students live within 1 mile of their school
 
 ```{r}
-
 school_buffers <- 
   student_home_tracts_with_bell_times %>% 
   # draw a mile buffer around each school (make sure to transform projection first from 4326)
   mutate(school_buffered = st_transform(school_polygon, 32618) %>% st_buffer(2414.01) %>% st_transform(4326)) %>%
-  # check if tract centroid is within the buffered zone
   rename(tract_point = geometry) %>% 
   ungroup() %>%
   mutate(row_number = row_number()) %>%
   group_by(row_number) %>%
   mutate(is_within = lengths(st_within(tract_point, school_buffered)) > 0) %>% 
   ungroup() 
-
-
-
-
-school_buffers %>% 
-  group_by(name) %>% 
-  summarise(
-    n_students = sum(students),
-    n_students_within  = sum(students[is_within == TRUE]),
-    within_pct = n_students_within/n_students*100
-  ) %>% 
-  left_join(enrollment_23, by = c("name" = "name")) %>% 
-  dplyr::select(name, enrollment, n_students, n_students_within, within_pct) %>% 
-  ungroup() %>% 
-  left_join(bus_arrivals_avg, by = c("name" = "name")) %>% 
-  group_by(name) %>% 
-  mutate(enrollment = as.numeric(enrollment)) %>% 
-  # dplyr::select(name, enrollment, min_date:median_n_morning, within_pct) %>% 
-  # are there enough buses to get kids there in the morning?
-  # let's try a couple different things. We'll predict the total number of students the bus can fit if average bus capacity is 45, 55, 65, and 75
-  # we'll then see if the number of students that can fit on the bus is greater than the number of students at the school
-  # if it is, we'll say that the school is adequately served
-  mutate(
-    capacity_25_morning = case_when(
-      !is.na(within_pct) ~ median_morning * 25 / (enrollment * (1 - within_pct/100)) * 100,
-      TRUE ~ median_morning * 25 / (enrollment * (1 - 12.14193	/100))),
-    capacity_35_morning = case_when(
-      !is.na(within_pct) ~ median_morning * 35 / (enrollment * (1 - within_pct/100)) * 100,
-      TRUE ~ median_morning * 35 / (enrollment * (1 - 12.14193/100))),
-    capacity_45_morning = case_when(
-      !is.na(within_pct) ~ median_morning * 45 / (enrollment * (1 - within_pct/100)) * 100,
-      TRUE ~ median_morning * 45 / (enrollment * (1 - 12.14193/100))),
-    capacity_25_afternoon = case_when(
-      !is.na(within_pct) ~ median_afternoon * 25 / (enrollment * (1 - within_pct/100)) * 100,
-      TRUE ~ median_afternoon * 25 / (enrollment * (1 - 12.14193/100))),
-    capacity_35_afternoon = case_when(
-      !is.na(within_pct) ~ median_afternoon * 35 / (enrollment * (1 - within_pct/100)) * 100,
-      TRUE ~ median_afternoon * 35 / (enrollment * (1 - 12.14193/100))),
-    capacity_45_afternoon = case_when(
-      !is.na(within_pct) ~ median_afternoon * 45 / (enrollment * (1 - within_pct/100)) * 100,
-      TRUE ~ median_afternoon * 45 / (enrollment * (1 - 12.14193/100)))
-  ) %>% 
-  left_join(
-    first_period_attendance_all,
-    by = c("name" = "school")
-  ) 
-  # write_csv(here::here("data", "output", "are_there_enough_buses_12_18.csv"))
-  
-
-  
-  
-  # 
-  # dplyr::select(
-  #   name, 
-  #   min_date,
-  #   max_date,
-  #   within_pct,
-  #   enrollment_approx,
-  #   enrollment,
-  #   median_n_morning,
-  #   capacity_25_morning:capacity_45_morning,
-  #   median_n_afternoon,
-  #   capacity_25_afternoon:capacity_45_afternoon
-  # ) %>% 
-  # rename(
-  #   enrollment_actual = enrollment
-  # ) %>% 
-
-
-
-
-
+# school_buffers %>% 
+#   group_by(name) %>% 
+#   summarise(
+#     n_students = sum(students),
+#     n_students_within  = sum(students[is_within == TRUE]),
+#     within_pct = n_students_within/n_students*100
+#   ) %>% 
+#   left_join(enrollment_23, by = c("name" = "name")) %>% 
+#   dplyr::select(name, enrollment, n_students, n_students_within, within_pct) %>% 
+#   ungroup() %>% 
+#   left_join(bus_arrivals_avg, by = c("name" = "name")) %>% 
+#   group_by(name) %>% 
+#   mutate(enrollment = as.numeric(enrollment)) %>% 
+#   # are there enough buses to get kids there in the morning?
+#   # let's try a couple different things. We'll predict the total number of students the bus can fit if average bus capacity is 45, 55, 65, and 75
+#   # we'll then see if the number of students that can fit on the bus is greater than the number of students at the school
+#   # if it is, we'll say that the school is adequately served
+#   mutate(
+#     capacity_25_morning = case_when(
+#       !is.na(within_pct) ~ median_morning * 25 / (enrollment * (1 - within_pct/100)) * 100,
+#       TRUE ~ median_morning * 25 / (enrollment * (1 - 12.14193	/100))),
+#     capacity_35_morning = case_when(
+#       !is.na(within_pct) ~ median_morning * 35 / (enrollment * (1 - within_pct/100)) * 100,
+#       TRUE ~ median_morning * 35 / (enrollment * (1 - 12.14193/100))),
+#     capacity_45_morning = case_when(
+#       !is.na(within_pct) ~ median_morning * 45 / (enrollment * (1 - within_pct/100)) * 100,
+#       TRUE ~ median_morning * 45 / (enrollment * (1 - 12.14193/100))),
+#     capacity_25_afternoon = case_when(
+#       !is.na(within_pct) ~ median_afternoon * 25 / (enrollment * (1 - within_pct/100)) * 100,
+#       TRUE ~ median_afternoon * 25 / (enrollment * (1 - 12.14193/100))),
+#     capacity_35_afternoon = case_when(
+#       !is.na(within_pct) ~ median_afternoon * 35 / (enrollment * (1 - within_pct/100)) * 100,
+#       TRUE ~ median_afternoon * 35 / (enrollment * (1 - 12.14193/100))),
+#     capacity_45_afternoon = case_when(
+#       !is.na(within_pct) ~ median_afternoon * 45 / (enrollment * (1 - within_pct/100)) * 100,
+#       TRUE ~ median_afternoon * 45 / (enrollment * (1 - 12.14193/100)))
+#   ) %>% 
+#   left_join(
+#     first_period_attendance_all,
+#     by = c("name" = "school")
+#   ) 
 ```
 
 # read and combine
@@ -780,16 +713,11 @@ bus_arrivals_avg <-
     median_morning = median(median_n_morning, na.rm = T),
     max_morning = max(max_n_morning, na.rm = T),
     min_morning = min(min_n_morning, na.rm = T),
-    # sd_morning = sd(avg_n_morning, na.rm = T),
-    # variance_morning = var(avg_n_morning, na.rm = T),
     avg_afternoon = mean(avg_n_afternoon, na.rm = T),
     median_afternoon = median(median_n_afternoon, na.rm = T),
     max_afternoon = max(max_n_afternoon, na.rm = T),
     min_afternoon = min(min_n_afternoon, na.rm = T)
-    # sd_afternoon = sd(avg_n_afternoon, na.rm = T),
-    # variance_afternoon = var(avg_n_afternoon, na.rm = T),
   ) 
-
 
 
 are_there_enough_buses <- 
@@ -806,7 +734,6 @@ are_there_enough_buses <-
   left_join(bus_arrivals_avg, by = c("name" = "name")) %>% 
   group_by(name) %>% 
   mutate(enrollment = as.numeric(enrollment)) %>% 
-  # dplyr::select(name, enrollment, min_date:median_n_morning, within_pct) %>% 
   # are there enough buses to get kids there in the morning?
   # let's try a couple different things. We'll predict the total number of students the bus can fit if average bus capacity is 45, 55, 65, and 75
   # we'll then see if the number of students that can fit on the bus is greater than the number of students at the school
@@ -841,12 +768,4 @@ are_there_enough_buses <-
     first_period_attendance_all,
     by = c("name" = "school")
   ) 
-
-are_there_enough_buses %>% 
-  write_rds(here::here("data", "output", "are_there_enough_buses_within_30_02_14.rds"))
-# 
-
-
-
-
 ```

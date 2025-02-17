@@ -38,6 +38,9 @@ library(future.apply)
 library(readxl)
 library(future.apply)
 library(here)
+
+# You're going to need a swiftly API key for MTA data
+
 source("functions/mta_api_functions.R")
 
 # turn off scientific notation 
@@ -111,7 +114,7 @@ weekend <-
 
 # filter for dates that fall during a weekday
 dates <-
-  seq.Date(from = as.Date("2024-12-03"), to = as.Date("2025-01-14"), by = "day") %>%
+  seq.Date(from = as.Date("2024-08-26"), to = as.Date("2025-01-14"), by = "day") %>%
   .[! . %in% to_rm] %>% 
   .[! . %in% weekend] %>% 
   as.character()
@@ -137,7 +140,7 @@ grab_and_combine_schedules <- function(route_ids, dates) {
         # make the API call
         schedule_response <- 
           VERB("GET", schedule_url, query = schedule_queryString, 
-               add_headers('Authorization' = '0352517c0285694758568f98b6f013ba'), 
+               add_headers('Authorization' = 'YOUR-API-KEY'), 
                content_type("application/octet-stream"),
                accept("application/json"))
         
@@ -249,7 +252,7 @@ grab_and_combine_schedules <- function(route_ids, dates) {
 schedule_url <- "https://api.goswift.ly/info/mta-maryland/schedule"
 
 # Greg's API key
-auth_header <- '0352517c0285694758568f98b6f013ba'
+auth_header <- 'YOUR-API-KEY'
 
 # make an empty list object for full schedules (by day)
 full_schedules <- list()
@@ -342,12 +345,4 @@ for (date in dates) {
     full_schedules[[as.character(date)]] <- schedules_df
   }
 }
-
-# Combine all the schedules into one large data frame
-# full_schedule_df <- rbindlist(full_schedules, use.names = TRUE)
-
-# full_schedule_df %>% 
-#   write_csv(here::here("data", "full_schedule_df_8_26_through_9_12.csv"))
-
-
 ```

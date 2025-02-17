@@ -3,12 +3,6 @@ title: "get remaining files from s3"
 editor: visual
 ---
 
-## Get the remaining files we need from S3
-
-This script is going to check our bus locations folder in the desktop and ensure that each day folder has hours between 4 and 23 and each hour folder inside each day folder has between 710 and 725 json files.
-
-I suspect we have almost everything, but let's see which ones we still need to go and grab by hand.
-
 ### Load packages
 
 ```{r}
@@ -55,70 +49,12 @@ plan(multisession, workers = parallel::detectCores() - 1)
 ```
 
 ```{r}
-# Helper function to create date-based directories
-create_output_dirs <- function(base_path) {
-  if (!dir.exists(base_path)) {
-    dir.create(base_path, recursive = TRUE)
-  }
-}
-
-# Function to determine the date from a file path
-extract_date <- function(file_path) {
-  # Assuming the date is in YYYY-MM-DD format somewhere in the path
-  date_pattern <- "\\d{4}-\\d{2}-\\d{2}"
-  date_match <- regexpr(date_pattern, file_path)
-  if (date_match != -1) {
-    return(substr(file_path, date_match, date_match + 9))
-  }
-  return(NULL)
-}
-
-# 
-# Function to determine the date from a file path
-extract_date <- function(file_path) {
-  date_pattern <- "\\d{4}-\\d{2}-\\d{2}"
-  date_match <- regexpr(date_pattern, file_path)
-  if (date_match != -1) {
-    return(substr(file_path, date_match, date_match + 9))
-  }
-  return(NULL)
-}
-
-# Helper function to flatten nested JSON
-flatten_json_df <- function(data) {
-  if (!is.data.frame(data)) {
-    data <- as.data.frame(data)
-  }
-
-  # Identify list columns that need flattening
-  list_cols <- sapply(data, is.list)
-
-  # Flatten each list column
-  for (col in names(data)[list_cols]) {
-    # Convert lists to character if they can't be easily flattened
-    if (all(sapply(data[[col]], length) == 1)) {
-      data[[col]] <- unlist(data[[col]])
-    } else {
-      # For complex nested structures, convert to JSON string
-      data[[col]] <- sapply(data[[col]], function(x) {
-        if (length(x) > 1) {
-          jsonlite::toJSON(x)
-        } else {
-          as.character(x)
-        }
-      })
-    }
-  }
-
-  return(data)
-}
-```
-
-```{r}
 
 hours_of_interest <- c("05", "06","07", "08", "09", "10", "11", "12", "13", "14", "15", "16")
 
 # make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 1/14, excluding weekends 
+#holidays and weekends to remove
+# make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 12/02, excluding weekends 
 #holidays and weekends to remove
 all_holidays <- 
   c("2017-09-04", "2017-09-21", "2017-09-22", "2017-10-09",
@@ -169,6 +105,8 @@ breaks <- c(ymd("2017-03-24"):ymd("2017-04-03"), ymd("2017-06-16"):ymd("2017-09-
 
 to_rm <- c(all_holidays, breaks) %>% as_date
 
+to_rm <- c(all_holidays, breaks) %>% as_date
+
 
 # grab our data range (i.e. weekdays from the first day of school until Monday, December 2nd)
 weekend <-
@@ -182,7 +120,7 @@ weekend <-
 # filter them out of dates 
 
 dates_for_processing <- 
-  seq.Date(from = as.Date("2024-12-03"), to = as.Date("2025-01-14"), by = "day") %>%
+  seq.Date(from = as.Date("2024-08-26"), to = as.Date("2025-01-14"), by = "day") %>%
   .[! . %in% to_rm] %>% 
   .[! . %in% weekend] %>% 
   as.character()
@@ -198,7 +136,7 @@ dates_for_processing <-
 #   .[!weekdays(.) %in% c("Saturday", "Sunday")]
 
 # grab desktop path (insert your own path to the jsons)
-local_path <- "/Users/greg.morton/Desktop/bus-positions/school-transportation/vehicle-positions/json"
+local_path <- "/Users/your.name/Desktop/bus-positions/school-transportation/vehicle-positions/json"
 
 # get all the day folders as a list we can iterate over 
 day_folders <-
@@ -283,10 +221,6 @@ read_and_standardize <- function(file, all_columns) {
   
   file_date <- 
     substr(file_name, 16, nchar(file_name) - 6) %>% as.Date(format = "%Y%m%d")
-  
-  # print(file_date)
-  # print(file_time)
-  # 
 
   data <- 
     fromJSON(file, simplifyDataFrame = TRUE)
@@ -331,7 +265,7 @@ read_and_standardize <- function(file, all_columns) {
   
 
   # replace with your file path (i'm keeping it out of the repo to make my code a little more efficient)
-  write_rds(data, paste0("/Users/greg.morton/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", file_date, "/", file_date, "-", file_time, ".rds"))
+  write_rds(data, paste0("/Users/your.name/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", file_date, "/", file_date, "-", file_time, ".rds"))
   
 }
 
@@ -349,7 +283,7 @@ process_bus_data_by_day <-
   
   # get all the files in the date folder
   # replace file path with your own
-  files <- list.files(paste0("/Users/greg.morton/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", date), full.names = TRUE, pattern = "\\.rds$", recursive = TRUE) 
+  files <- list.files(paste0("/Users/your.name/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", date), full.names = TRUE, pattern = "\\.rds$", recursive = TRUE) 
 
   # # processing start message
   message("processing ", date)
@@ -395,7 +329,7 @@ process_bus_data_by_day <-
   # 
   # # write our combined data back to source folder 
   # replace file path with your own
-  write_rds(data, paste0("/Users/greg.morton/Desktop/bus-positions/school-transportation/processed_bus_data/processed_stops_by_date/", date, ".rds"))
+  write_rds(data, paste0("/Users/your.name/Desktop/bus-positions/school-transportation/processed_bus_data/processed_stops_by_date/", date, ".rds"))
     
   # return(data)
   

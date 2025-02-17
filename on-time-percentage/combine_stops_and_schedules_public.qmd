@@ -1,16 +1,9 @@
 ---
-title: "combine stops and schedules"
+title: "Combine stops and schedule"
 editor: visual
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
+## Setup
 ```{r}
 library(tidyverse)
 library(lubridate)
@@ -43,8 +36,6 @@ library(future.apply)
 library(readxl)
 library(here)
 library(furrr)
-
-# IMPORTANT: make sure you replace the placeholder API keys in the script below with your own.
 source("functions/mta_api_functions.R")
 
 # turn off scientific notation 
@@ -52,11 +43,9 @@ options(scipen = 999)
 
 # set up parallel processing
 plan(multisession, workers = parallel::detectCores() - 1)  
-
 ```
 
 # filter breaks and holidays out of our dates
-
 ```{r}
 # make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 12/02, excluding weekends 
 #holidays and weekends to remove
@@ -132,7 +121,6 @@ dates_for_processing <-
 ```
 
 # combine all schedules for a date
-
 ```{r}
 
 get_daily_schedule <- function(date = "2024-08-26") {
@@ -159,8 +147,6 @@ dates_for_processing %>%
 # function to combine schedule and bus observations
 
 ```{r}
-
-
 combine_schedule_and_stops <- 
   function(date = "2024-08-26") {
   
@@ -201,13 +187,13 @@ final_schedule_object <-
       # mutate(time_reported_et = with_tz(hms::as_hms(timestamp), "America/New_York")) %>%
     # we'll consider anything between 2 minutes early and 7 minutes late as "on time"
     on_time = ifelse(as.numeric(timestamp_2 - schedtime) >= -120 & as.numeric(timestamp_2 - schedtime) <= 420, TRUE, FALSE),
-    on_time_5 = ifelse(as.numeric(timestamp_2 - schedtime) >= -120 & as.numeric(timestamp_2 - schedtime) <= 300, TRUE, FALSE),
-    on_time_3 = ifelse(as.numeric(timestamp_2 - schedtime) >= -120 & as.numeric(timestamp_2 - schedtime) <= 180, TRUE, FALSE),
+    on_time_5 = ifelse(as.numeric(timestamp_2 - schedtime) >= -60 & as.numeric(timestamp_2 - schedtime) <= 300, TRUE, FALSE),
+    on_time_4 = ifelse(as.numeric(timestamp_2 - schedtime) >= -60 & as.numeric(timestamp_2 - schedtime) <= 240, TRUE, FALSE),
     on_time_20 = ifelse(as.numeric(timestamp_2 - schedtime) <= 1200, TRUE, FALSE),
     # we'll consider a bus late if it's more than 7 minutes behind schedule
     late = ifelse(as.numeric(timestamp_2 - schedtime) > 420, TRUE, FALSE),
     late_5 = ifelse(as.numeric(timestamp_2 - schedtime) > 300, TRUE, FALSE),
-    late_3 = ifelse(as.numeric(timestamp_2 - schedtime) > 180, TRUE, FALSE),
+    late_4 = ifelse(as.numeric(timestamp_2 - schedtime) > 240, TRUE, FALSE),
     late_20 = ifelse(as.numeric(timestamp_2 - schedtime) > 1200, TRUE, FALSE),
     # we'll consider a bus early if it's more than 2 minutes ahead of schedule
     early = ifelse(as.numeric(timestamp_2 - schedtime) < -120, TRUE, FALSE),
@@ -271,16 +257,6 @@ get_final_schedule <- function(date = "2024-08-26") {
   
   return(final_schedule_object)
 }
-
-# final_schedule_object <- 
-#   get_final_schedule("2024-10-04")
-
-
-
-
-
-
-
 ```
 
 # Get OTP stats for our entire time period
@@ -309,41 +285,13 @@ for(i in dates_for_processing) {
                TRUE ~ on_time)
            ) %>% 
     mutate(stop_id = as.character(stopId)) %>%
-    # left_join(D_school_stop_cens_j_join, by = c("stopId" = "Stop_Number")) %>%
     mutate(
       # i = str_c(year, "-", month, "-", day_of_month) %>% ymd,
            time = case_when(hour.x%in%c(14,15,16)~"afternoon",
                             hour.x%in%c(5, 6,7,8)~"morning",
                             TRUE ~ "other")
            ) %>% 
-    # filter(time == "morning" | time == "afternoon") %>% 
-    # join to school enrollment data
-    # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>% 
-    # join to school start and stop times
-    # left_join(sst_new, by = c("name"="name")) %>% 
-    # filter(!is.na(am_bell) | !is.na(pm_bell)) %>% 
     ungroup %>% 
-    # filter(!is.na(hour) | !is.na(minute)) %>% 
-    # mutate the exact time of the bus location and turn the bell times into hms objects
-    # mutate(
-    #   bus_hour = as_hms(schedtime),
-    #   closing_bell = as_hms(pm_bell),
-    #   opening_bell = as_hms(am_bell),
-    #   # create a variable that tells us if the bus location is near a school right before or right after the bell (1 hour)
-    #   keep_filt = 
-    #     case_when(
-    #       time =="afternoon"&
-    #         (bus_hour>closing_bell)&
-    #         (bus_hour<(closing_bell+ as_hms("01:00:00")))~TRUE,
-    #       time=="morning"&
-    #         (bus_hour<opening_bell)&
-    #         (bus_hour>(opening_bell- as_hms("01:00:00")))~TRUE)
-    #   # ) %>% 
-    # filter(keep_filt == TRUE) %>%
-    # filter(is.na(name)==FALSE) %>% 
-    # filter(is.na(school_name)==FALSE) %>% 
-    # dplyr::select(route_id, trip_id, on_time, optimistic_on_time, pessimistic_on_time, headway, scheduled_headway) %>% 
-    # filter(is.na(headway)) %>% 
     group_by(time) %>%
     summarise(
       n = n(),
@@ -353,7 +301,7 @@ for(i in dates_for_processing) {
       median_observed = median(observed_pct),
       on_time_perc = mean(on_time, na.rm = T),
       on_time_perc_5 = mean(on_time_5, na.rm = T),
-      on_time_perc_3 = mean(on_time_3, na.rm = T),
+      on_time_perc_4 = mean(on_time_4, na.rm = T),
       on_time_perc_20 = mean(on_time_20, na.rm = T),
       optimistic_on_time_perc = mean(optimistic_on_time, na.rm = T),
       pessimistic_on_time_perc = mean(pessimistic_on_time, na.rm = T),
@@ -371,7 +319,6 @@ for(i in dates_for_processing) {
 ```
 
 ```{r}
-
 morning_otp <- 
   final_otp_results_list %>% 
   map_dfr(~ .x %>% filter(time == "morning")) %>% 
@@ -383,7 +330,8 @@ afternoon_otp <-
   map_dfr(~ .x %>% filter(time == "afternoon")) %>% 
   bind_rows() 
 
-morning_otp %>% 
+summary_morning_otp <- 
+  morning_otp %>% 
   summarise(
     n_days = n(),
     n_rows = sum(n),
@@ -394,17 +342,17 @@ morning_otp %>%
     median_observed = median(median_observed),
     on_time_perc = mean(on_time_perc),
     on_time_perc_5 = mean(on_time_perc_5),
-    on_time_perc_3 = mean(on_time_perc_3),
+    on_time_perc_4 = mean(on_time_perc_4),
     on_time_perc_20 = mean(on_time_perc_20),
     optimistic_on_time_perc = mean(optimistic_on_time_perc),
     pessimistic_on_time_perc = mean(pessimistic_on_time_perc),
     # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway)
-  ) %>% 
-  write_csv("data/output/morning_otp_01_28.csv")
+  ) 
 
-afternoon_otp %>% 
+summary_afternoon_otp <- 
+  afternoon_otp %>% 
     summarise(
     n_days = n(),
     n_rows = sum(n),
@@ -415,17 +363,13 @@ afternoon_otp %>%
     median_observed = median(median_observed),
     on_time_perc = mean(on_time_perc),
     on_time_perc_5 = mean(on_time_perc_5),
-    on_time_perc_3 = mean(on_time_perc_3),
+    on_time_perc_4 = mean(on_time_perc_4),
     on_time_perc_20 = mean(on_time_perc_20),
     optimistic_on_time_perc = mean(optimistic_on_time_perc),
     pessimistic_on_time_perc = mean(pessimistic_on_time_perc),
-    # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway)
-  ) %>% 
-  write_csv("data/output/afternoon_otp_01_28.csv")
-
-
+  ) 
 ```
 
 # Get OTP stats for our entire time period (by line)
@@ -461,34 +405,7 @@ for(i in dates_for_processing) {
                             hour.x%in%c(5, 6,7,8)~"morning",
                             TRUE ~ "other")
            ) %>% 
-    # filter(time == "morning" | time == "afternoon") %>% 
-    # join to school enrollment data
-    # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>% 
-    # join to school start and stop times
-    # left_join(sst_new, by = c("name"="name")) %>% 
-    # filter(!is.na(am_bell) | !is.na(pm_bell)) %>% 
     ungroup %>% 
-    # filter(!is.na(hour) | !is.na(minute)) %>% 
-    # mutate the exact time of the bus location and turn the bell times into hms objects
-    # mutate(
-    #   bus_hour = as_hms(schedtime),
-    #   closing_bell = as_hms(pm_bell),
-    #   opening_bell = as_hms(am_bell),
-    #   # create a variable that tells us if the bus location is near a school right before or right after the bell (1 hour)
-    #   keep_filt = 
-    #     case_when(
-    #       time =="afternoon"&
-    #         (bus_hour>closing_bell)&
-    #         (bus_hour<(closing_bell+ as_hms("01:00:00")))~TRUE,
-    #       time=="morning"&
-    #         (bus_hour<opening_bell)&
-    #         (bus_hour>(opening_bell- as_hms("01:00:00")))~TRUE)
-    #   # ) %>% 
-    # filter(keep_filt == TRUE) %>%
-    # filter(is.na(name)==FALSE) %>% 
-    # filter(is.na(school_name)==FALSE) %>% 
-    # dplyr::select(route_id, trip_id, on_time, optimistic_on_time, pessimistic_on_time, headway, scheduled_headway) %>% 
-    # filter(is.na(headway)) %>% 
     group_by(time, route_name) %>%
     summarise(
       n = n(),
@@ -498,7 +415,7 @@ for(i in dates_for_processing) {
       median_observed = median(observed_pct),
       on_time_perc = mean(on_time, na.rm = T),
       on_time_perc_5 = mean(on_time_5, na.rm = T),
-      on_time_perc_3 = mean(on_time_3, na.rm = T),
+      on_time_perc_4 = mean(on_time_4, na.rm = T),
       optimistic_on_time_perc = mean(optimistic_on_time, na.rm = T),
       pessimistic_on_time_perc = mean(pessimistic_on_time, na.rm = T),
       headway_adherence = mean(headway_adherence, na.rm = T),
@@ -509,11 +426,7 @@ for(i in dates_for_processing) {
   
   final_otp_results_list_by_line [[i]] <- on_time_rates_by_line
   
-  
 }
-
-
-
 ```
 
 ```{r}
@@ -550,17 +463,18 @@ morning_otp_line <-
     median_observed = median(median_observed),
     on_time_perc = mean(on_time_perc),
     on_time_perc_5 = mean(on_time_perc_5),
-    on_time_perc_3 = mean(on_time_perc_3),
+    on_time_perc_4 = mean(on_time_perc_4),
     optimistic_on_time_perc = mean(optimistic_on_time_perc),
     pessimistic_on_time_perc = mean(pessimistic_on_time_perc),
     # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway, na.rm = T)
   ) %>% 
-  left_join(route_id_crosswalk, by = c("route_name" = "name"))
-  write_csv("data/output/morning_otp_by_line_01_28.csv")
+  left_join(route_id_crosswalk, by = c("route_name" = "name")) %>% 
+  arrange(on_time_perc)
 
-afternoon_otp_ <- 
+
+afternoon_otp_line <-
   afternoon_otp_by_line %>% 
   group_by(route_name) %>% 
   summarise(
@@ -573,21 +487,18 @@ afternoon_otp_ <-
     median_observed = median(median_observed),
     on_time_perc = mean(on_time_perc),
     on_time_perc_5 = mean(on_time_perc_5),
-    on_time_perc_3 = mean(on_time_perc_3),
+    on_time_perc_4 = mean(on_time_perc_4),
     optimistic_on_time_perc = mean(optimistic_on_time_perc),
     pessimistic_on_time_perc = mean(pessimistic_on_time_perc),
     # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway, na.rm = T)
   ) %>% 
-  left_join(route_id_crosswalk, by = c("route_name" = "name")) 
-  write_csv("data/output/afternoon_otp_by_line_01_28.csv")
-
-
+  left_join(route_id_crosswalk, by = c("route_name" = "name")) %>% 
+  arrange(on_time_perc)
 ```
 
 # Get OTP stats for our entire time period (by stop)
-
 ```{r}
 
 final_otp_results_list_by_stop<- list()
@@ -596,7 +507,6 @@ for(i in dates_for_processing) {
   
   final_schedule_object <- 
     read_rds(here::here("data", "final_schedule_objects", paste0("final_schedule_object-", i, ".rds")))
-  
   
   # system-wide 
   on_time_rates_by_stop <-
@@ -619,34 +529,7 @@ for(i in dates_for_processing) {
                             hour.x%in%c(5, 6,7,8)~"morning",
                             TRUE ~ "other")
            ) %>% 
-    # filter(time == "morning" | time == "afternoon") %>% 
-    # join to school enrollment data
-    # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>% 
-    # join to school start and stop times
-    # left_join(sst_new, by = c("name"="name")) %>% 
-    # filter(!is.na(am_bell) | !is.na(pm_bell)) %>% 
     ungroup %>% 
-    # filter(!is.na(hour) | !is.na(minute)) %>% 
-    # mutate the exact time of the bus location and turn the bell times into hms objects
-    # mutate(
-    #   bus_hour = as_hms(schedtime),
-    #   closing_bell = as_hms(pm_bell),
-    #   opening_bell = as_hms(am_bell),
-    #   # create a variable that tells us if the bus location is near a school right before or right after the bell (1 hour)
-    #   keep_filt = 
-    #     case_when(
-    #       time =="afternoon"&
-    #         (bus_hour>closing_bell)&
-    #         (bus_hour<(closing_bell+ as_hms("01:00:00")))~TRUE,
-    #       time=="morning"&
-    #         (bus_hour<opening_bell)&
-    #         (bus_hour>(opening_bell- as_hms("01:00:00")))~TRUE)
-    #   # ) %>% 
-    # filter(keep_filt == TRUE) %>%
-    # filter(is.na(name)==FALSE) %>% 
-    # filter(is.na(school_name)==FALSE) %>% 
-    # dplyr::select(route_id, trip_id, on_time, optimistic_on_time, pessimistic_on_time, headway, scheduled_headway) %>% 
-    # filter(is.na(headway)) %>% 
     group_by(time, stopName) %>%
     summarise(
       n = n(),
@@ -667,11 +550,7 @@ for(i in dates_for_processing) {
   
   final_otp_results_list_by_stop[[i]] <- on_time_rates_by_stop
   
-  
 }
-
-
-
 ```
 
 ```{r}
@@ -687,7 +566,8 @@ afternoon_otp_by_stop <-
   map_dfr(~ .x %>% filter(time == "afternoon")) %>% 
   bind_rows() 
 
-morning_otp_by_stop %>% 
+morning_otp_by_stop_summary <-
+  morning_otp_by_stop %>% 
   group_by(stopName) %>% 
   summarise(
     n_days = n(),
@@ -705,10 +585,10 @@ morning_otp_by_stop %>%
     # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway)
-  ) %>% 
-  write_csv("data/output/morning_otp_by_stop_01_28.csv")
+  ) 
 
-afternoon_otp_by_stop %>% 
+afternoon_otp_by_stop_summary <-
+  afternoon_otp_by_stop %>% 
   group_by(stopName) %>% 
   summarise(
     n_days = n(),
@@ -726,392 +606,5 @@ afternoon_otp_by_stop %>%
     # headway_adherence = mean(headway_adherence),
     mean_headway = mean(mean_headway),
     median_headway = median(median_headway)
-) %>% 
-  write_csv("data/output/afternoon_otp_by_stop_01_16.csv")
-
-
+) 
 ```
-
-<!-- ```{r} -->
-
-<!-- # system-wide  -->
-
-<!-- on_time_rates_system_wide <- -->
-
-<!--   final_schedule_object %>% -->
-
-<!--   filter(hour.x >= 5 & hour.x <= 16) %>%  -->
-
-<!--   mutate(optimistic_on_time =  -->
-
-<!--            case_when( -->
-
-<!--              is.na(hour.y) ~ TRUE, -->
-
-<!--              TRUE ~ on_time), -->
-
-<!--          pessimistic_on_time =  -->
-
-<!--            case_when( -->
-
-<!--              is.na(hour.y) ~ FALSE, -->
-
-<!--              TRUE ~ on_time) -->
-
-<!--          ) %>%  -->
-
-<!--   mutate(stop_id = as.character(stopId)) %>% -->
-
-<!--   # left_join(D_school_stop_cens_j_join, by = c("stopId" = "Stop_Number")) %>% -->
-
-<!--   mutate( -->
-
-<!--     # date = str_c(year, "-", month, "-", day_of_month) %>% ymd, -->
-
-<!--          time = case_when(hour.x%in%c(14,15,16)~"afternoon", -->
-
-<!--                           hour.x%in%c(5, 6,7,8)~"morning", -->
-
-<!--                           TRUE ~ "other") -->
-
-<!--          ) %>%  -->
-
-<!--   # filter(time == "morning" | time == "afternoon") %>%  -->
-
-<!--   # join to school enrollment data -->
-
-<!--   # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>%  -->
-
-<!--   # join to school start and stop times -->
-
-<!--   # left_join(sst_new, by = c("name"="name")) %>%  -->
-
-<!--   # filter(!is.na(am_bell) | !is.na(pm_bell)) %>%  -->
-
-<!--   ungroup %>%  -->
-
-<!--   # filter(!is.na(hour) | !is.na(minute)) %>%  -->
-
-<!--   # mutate the exact time of the bus location and turn the bell times into hms objects -->
-
-<!--   # mutate( -->
-
-<!--   #   bus_hour = as_hms(schedtime), -->
-
-<!--   #   closing_bell = as_hms(pm_bell), -->
-
-<!--   #   opening_bell = as_hms(am_bell), -->
-
-<!--   #   # create a variable that tells us if the bus location is near a school right before or right after the bell (1 hour) -->
-
-<!--   #   keep_filt =  -->
-
-<!--   #     case_when( -->
-
-<!--   #       time =="afternoon"& -->
-
-<!--   #         (bus_hour>closing_bell)& -->
-
-<!--   #         (bus_hour<(closing_bell+ as_hms("01:00:00")))~TRUE, -->
-
-<!--   #       time=="morning"& -->
-
-<!--   #         (bus_hour<opening_bell)& -->
-
-<!--   #         (bus_hour>(opening_bell- as_hms("01:00:00")))~TRUE) -->
-
-<!--   #   # ) %>%  -->
-
-<!--   # filter(keep_filt == TRUE) %>% -->
-
-<!--   # filter(is.na(name)==FALSE) %>%  -->
-
-<!--   # filter(is.na(school_name)==FALSE) %>%  -->
-
-<!--   # dplyr::select(route_id, trip_id, on_time, optimistic_on_time, pessimistic_on_time, headway, scheduled_headway) %>%  -->
-
-<!--   # filter(is.na(headway)) %>%  -->
-
-<!--   group_by(time) %>% -->
-
-<!--   summarise( -->
-
-<!--     n = n(), -->
-
-<!--     min_date = min(service_date), -->
-
-<!--     max_date = max(service_date), -->
-
-<!--     observed = mean(sum(is.na(hour.y) == FALSE) / n), -->
-
-<!--     median_observed = median(observed_pct), -->
-
-<!--     on_time_perc = mean(on_time, na.rm = T), -->
-
-<!--     optimistic_on_time_perc = mean(optimistic_on_time, na.rm = T), -->
-
-<!--     pessimistic_on_time_perc = mean(pessimistic_on_time, na.rm = T), -->
-
-<!--     headway_adherence = mean(headway_adherence, na.rm = T), -->
-
-<!--     mean_headway = mean(headway, na.rm = T), -->
-
-<!--     median_headway = median(headway, na.rm = T) -->
-
-<!--   ) %>%  -->
-
-<!--   arrange(n)  -->
-
-<!-- #by line  -->
-
-<!-- on_time_rates_by_line<- final_schedule_object %>% -->
-
-<!--   filter(hour.x >= 5 & hour.x <= 16) %>%  -->
-
-<!--   mutate(optimistic_on_time =  -->
-
-<!--            case_when( -->
-
-<!--              is.na(hour.y) ~ TRUE, -->
-
-<!--              TRUE ~ on_time), -->
-
-<!--          pessimistic_on_time =  -->
-
-<!--            case_when( -->
-
-<!--              is.na(hour.y) ~ FALSE, -->
-
-<!--              TRUE ~ on_time) -->
-
-<!--          ) %>%  -->
-
-<!--   mutate(stop_id = as.character(stopId)) %>% -->
-
-<!--   # left_join(D_school_stop_cens_j_join, by = c("stopId" = "Stop_Number")) %>% -->
-
-<!--   mutate( -->
-
-<!--     # date = str_c(year, "-", month, "-", day_of_month) %>% ymd, -->
-
-<!--          time = case_when(hour.x%in%c(14,15,16)~"afternoon", -->
-
-<!--                           hour.x%in%c(5, 6,7,8)~"morning", -->
-
-<!--                           TRUE ~ "other") -->
-
-<!--          ) %>%  -->
-
-<!--   # filter(time == "morning" | time == "afternoon") %>%  -->
-
-<!--   # join to school enrollment data -->
-
-<!--   # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>%  -->
-
-<!--   # join to school start and stop times -->
-
-<!--   # left_join(sst_new, by = c("name"="name")) %>%  -->
-
-<!--   # filter(!is.na(am_bell) | !is.na(pm_bell)) %>%  -->
-
-<!--   ungroup %>%  -->
-
-<!--   # filter(!is.na(hour) | !is.na(minute)) %>%  -->
-
-<!--   # mutate the exact time of the bus location and turn the bell times into hms objects -->
-
-<!--   # mutate( -->
-
-<!--   #   bus_hour = as_hms(schedtime), -->
-
-<!--   #   closing_bell = as_hms(pm_bell), -->
-
-<!--   #   opening_bell = as_hms(am_bell), -->
-
-<!--   #   # create a variable that tells us if the bus location is near a school right before or right after the bell (1 hour) -->
-
-<!--   #   keep_filt =  -->
-
-<!--   #     case_when( -->
-
-<!--   #       time =="afternoon"& -->
-
-<!--   #         (bus_hour>closing_bell)& -->
-
-<!--   #         (bus_hour<(closing_bell+ as_hms("01:00:00")))~TRUE, -->
-
-<!--   #       time=="morning"& -->
-
-<!--   #         (bus_hour<opening_bell)& -->
-
-<!--   #         (bus_hour>(opening_bell- as_hms("01:00:00")))~TRUE) -->
-
-<!--   #   # ) %>%  -->
-
-<!--   # filter(keep_filt == TRUE) %>% -->
-
-<!--   # filter(is.na(name)==FALSE) %>%  -->
-
-<!--   # filter(is.na(school_name)==FALSE) %>%  -->
-
-<!--   # dplyr::select(route_id, trip_id, on_time, optimistic_on_time, pessimistic_on_time, headway, scheduled_headway) %>%  -->
-
-<!--   # filter(is.na(headway)) %>%  -->
-
-<!--   group_by(route_id) %>% -->
-
-<!--   summarise( -->
-
-<!--     n = n(), -->
-
-<!--     min_date = min(service_date), -->
-
-<!--     max_date = max(service_date), -->
-
-<!--     observed = mean(sum(is.na(hour.y) == FALSE) / n), -->
-
-<!--     median_observed = median(observed_pct), -->
-
-<!--     on_time_perc = mean(on_time, na.rm = T), -->
-
-<!--     optimistic_on_time_perc = mean(optimistic_on_time, na.rm = T), -->
-
-<!--     pessimistic_on_time_perc = mean(pessimistic_on_time, na.rm = T), -->
-
-<!--     headway_adherence = mean(headway_adherence, na.rm = T), -->
-
-<!--     mean_headway = mean(headway, na.rm = T), -->
-
-<!--     median_headway = median(headway, na.rm = T) -->
-
-<!--   ) %>%  -->
-
-<!--   arrange(n)  -->
-
-<!-- # by stop -->
-
-<!-- on_time_rates_by_stop <- final_schedule_object %>% -->
-
-<!--   filter(hour.x >= 5 & hour.x <= 16) %>%  -->
-
-<!--   mutate(optimistic_on_time =  -->
-
-<!--            case_when( -->
-
-<!--              is.na(hour.y) ~ TRUE, -->
-
-<!--              TRUE ~ on_time), -->
-
-<!--          pessimistic_on_time =  -->
-
-<!--            case_when( -->
-
-<!--              is.na(hour.y) ~ FALSE, -->
-
-<!--              TRUE ~ on_time) -->
-
-<!--          ) %>%  -->
-
-<!--   mutate(stop_id = as.character(stopId)) %>% -->
-
-<!--   # left_join(D_school_stop_cens_j_join, by = c("stopId" = "Stop_Number")) %>% -->
-
-<!--   mutate( -->
-
-<!--     # date = str_c(year, "-", month, "-", day_of_month) %>% ymd, -->
-
-<!--          time = case_when(hour.x%in%c(14,15,16)~"afternoon", -->
-
-<!--                           hour.x%in%c(5, 6,7,8)~"morning", -->
-
-<!--                           TRUE ~ "other") -->
-
-<!--          ) %>%  -->
-
-<!--   # filter(time == "morning" | time == "afternoon") %>%  -->
-
-<!--   # join to school enrollment data -->
-
-<!--   # left_join(school_enrollments, by = c("school_name"="school_name_tracts")) %>%  -->
-
-<!--   # join to school start and stop times -->
-
-<!--   # left_join(sst_new, by = c("name"="name")) %>%  -->
-
-<!--   # filter(!is.na(am_bell) | !is.na(pm_bell)) %>%  -->
-
-<!--   ungroup %>%  -->
-
-<!--   # filter(!is.na(hour) | !is.na(minute)) %>%  -->
-
-<!--   # mutate the exact time of the bus location and turn the bell times into hms objects -->
-
-<!--   # mutate( -->
-
-<!--   #   bus_hour = as_hms(schedtime), -->
-
-<!--   #   closing_bell = as_hms(pm_bell), -->
-
-<!--   #   opening_bell = as_hms(am_bell), -->
-
-<!--   #   # create a variable that tells us if the bus location is near a school right before or right after the bell (1 hour) -->
-
-<!--   #   keep_filt =  -->
-
-<!--   #     case_when( -->
-
-<!--   #       time =="afternoon"& -->
-
-<!--   #         (bus_hour>closing_bell)& -->
-
-<!--   #         (bus_hour<(closing_bell+ as_hms("01:00:00")))~TRUE, -->
-
-<!--   #       time=="morning"& -->
-
-<!--   #         (bus_hour<opening_bell)& -->
-
-<!--   #         (bus_hour>(opening_bell- as_hms("01:00:00")))~TRUE) -->
-
-<!--   #   # ) %>%  -->
-
-<!--   # filter(keep_filt == TRUE) %>% -->
-
-<!--   # filter(is.na(name)==FALSE) %>%  -->
-
-<!--   # filter(is.na(school_name)==FALSE) %>%  -->
-
-<!--   # dplyr::select(route_id, trip_id, on_time, optimistic_on_time, pessimistic_on_time, headway, scheduled_headway) %>%  -->
-
-<!--   # filter(is.na(headway)) %>%  -->
-
-<!--   group_by(stopName) %>% -->
-
-<!--   summarise( -->
-
-<!--     n = n(), -->
-
-<!--     min_date = min(service_date), -->
-
-<!--     max_date = max(service_date), -->
-
-<!--     observed = mean(sum(is.na(hour.y) == FALSE) / n), -->
-
-<!--     median_observed = median(observed_pct), -->
-
-<!--     on_time_perc = mean(on_time, na.rm = T), -->
-
-<!--     optimistic_on_time_perc = mean(optimistic_on_time, na.rm = T), -->
-
-<!--     pessimistic_on_time_perc = mean(pessimistic_on_time, na.rm = T), -->
-
-<!--     headway_adherence = mean(headway_adherence, na.rm = T), -->
-
-<!--     mean_headway = mean(headway, na.rm = T), -->
-
-<!--     median_headway = median(headway, na.rm = T) -->
-
-<!--   ) %>%  -->
-
-<!--   arrange(n) -->
-
-<!-- ``` -->
