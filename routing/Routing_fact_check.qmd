@@ -1,0 +1,92 @@
+---
+title: "Routing fact check"
+editor: visual
+---
+
+# setup
+
+```{r}
+library(tidycensus)
+library(tidyverse)
+library(tigris)
+library(mapview)
+library(RColorBrewer)
+library(sf)
+library(mapview)
+library(janitor)
+
+# turn off scientific notation
+options(scipen = 999)
+
+```
+
+When everything runs on time, the average city student’s trip to school on mass transit takes about 40 minutes...
+
+```{r}
+trip_summaries <- 
+  read_rds("data/output/trip_summaries_weighted_01_17.rds") 
+
+trip_summaries
+```
+
+...twice as long as neighboring Baltimore County students spend on yellow buses...
+
+```{r}
+source("routing/baltco_bus_routes.R")
+
+am_routes_summary
+```
+
+...and longer than the average adult’s commute to work.
+
+```{r}
+# Set your Census API key
+# census_api_key("your_api_key_here", install = TRUE)
+
+# Get the ACS data for Baltimore City
+adult_commute_data <- get_acs(
+  geography = "county",
+  variables = c("B08006_001", "B08013_001"),
+  county = "Baltimore City",
+  state = "MD",
+  survey = "acs5",
+  year = 2023,
+  output = "wide"
+) %>% 
+  rename(
+    total_workers = B08006_001E,
+    agg_commute_time = B08013_001E,
+  ) %>% 
+  mutate(avg_commute_time_minutes = agg_commute_time / total_workers ) %>% 
+  dplyr::select(total_workers, avg_commute_time_minutes)
+
+adult_commute_data
+```
+
+Meanwhile, in the past decade families have been migrating away from the city’s core neighborhoods with the greatest concentration of transit and toward the edges, according to an analysis of U.S. Census data by The Banner.
+
+```{r}
+source("routing/children_movement_over_time.R")
+tracts_2010 %>% 
+  left_join(total_kids_2010, by = c("GEOID10" = "GEOID")) %>% 
+  mapview(zcol = "pct_kids", col.regions = brewer.pal(9, "YlOrRd"),
+          map.types = c("CartoDB.Positron", "OpenStreetMap.Mapnik"))
+
+tracts_2023 %>%
+  left_join(total_kids_2023, by = c("GEOID" = "GEOID")) %>% 
+  mapview(zcol = "pct_kids", col.regions = brewer.pal(9, "YlOrRd"),
+          map.types = c("CartoDB.Positron", "OpenStreetMap.Mapnik"))
+
+
+```
+
+Today, their routes to school are longer and more complicated. Fifty-eight percent of trips to school involve transferring from one line to another. That means one late bus can prevent a student from catching a connecting bus
+
+(we're talking in terms of all routes here so we use unweighted trip summaries)
+
+```{r}
+unweighted_trip_summaries <-
+  read_rds("data/output/unweighted_trip_summaries_01_17")
+
+unweighted_trip_summaries
+```

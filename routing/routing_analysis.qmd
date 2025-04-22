@@ -1,0 +1,875 @@
+---
+title: "Routing Analysis Public"
+editor: visual
+author: Greg Morton
+---
+
+## Transit nightmare: Thousands of Baltimore kids can’t get to school on time
+
+As part of our investigation 'Transit nightmare: Thousands of Baltimore kids can’t get to school on time', we estimated each Baltimore City middle and high school student's trip to school on public transit.
+
+Our estimates rely on Conveyal's r5, an open-source tool for modeling commute times and planning detailed routes between points.
+
+This repo is meant to serve as a guide to recreating our findings.
+
+```{r}
+# Load required packages
+library(devtools)
+library(elevatr)
+library(r5r)
+library(sf)
+library(osmextract)
+library(rJava)
+library(tidyverse)
+library(geobr)
+library(here)
+library(tigris)
+library(tidycensus)
+library(mapview)
+library(RColorBrewer)
+library(readxl)
+library(janitor)
+library(httr)
+library(hms)
+library(raster)
+library(terra)
+library(osmdata)
+library(readr)
+
+# turn off scientific notation
+options(scipen = 999)
+
+source("helpers/setup.R")
+```
+
+#### Get starting points for our trips to school
+
+"Because we only know where students live by their Census tract, geographical boundaries about the size of a city neighborhood, some trips are difficult to route. Some routes start and stop in the same tract; some tracts are bigger than others. We chose a starting point for each based on where most people live in the Census tract according to EU Global Human Settlement Layer data"
+
+We sampled a starting point randomly from each tract, but made sure to eliminate parks, schools, and industrial areas from the tracts. We also imposed a minimum estimated population density so as not to sample from places within tracts where no one lives.
+
+You can generate your own random sample with the code below or use ours.
+
+```{r}
+# # get a new grid sample
+# baltimore_grid_sampled <-
+#   baltimore_grid %>%
+#   as.data.frame() %>%
+#   st_as_sf(coords = c("x", "y"), crs = 4326) %>%
+#   st_difference(parks) %>%
+#   st_difference(schools) %>%
+#   st_difference(mizod) %>%
+#   st_join(bmore_tracts) %>%
+#   filter(!is.na(GEOID)) %>%
+#   # filter(!is.na(median_income)) %>%
+#   group_by(GEOID) %>%
+#   filter(GHS_BUILT_S_E2030_GLOBE_R2023A_54009_100_V1_0_R5_C12 > 3000) %>%
+#   # Calculate points_to_sample based on population proportion
+#   # Use group_modify to sample points
+#   # group_modify(~ slice_sample(.x, n = first(.x$points_to_sample), replace = TRUE)) %>%
+#   # sample one point from each tract
+#   group_modify(~ slice_sample(.x, n = 1, replace = TRUE)) %>%
+#   ungroup() %>%
+#   st_as_sf(crs = 4326) %>%
+#   st_make_valid() %>%
+#   mutate(geometry = st_make_valid(geometry)) %>%
+#   mutate(lon = map_dbl(geometry, ~st_coordinates(.)[1]),
+#          lat = map_dbl(geometry, ~st_coordinates(.)[2])) %>%
+#   ungroup() %>%
+#   mutate(id = row_number())
+
+# This was the sample we ultimately decided on 
+baltimore_grid_sampled <-
+  st_read("data/shapes/bmore_grid_sampled_01_27.geojson") %>%
+  st_as_sf()
+
+# Check our work
+# baltimore_grid_sampled %>%
+#   mapview(zcol = "GHS_BUILT_S_E2030_GLOBE_R2023A_54009_100_V1_0_R5_C12", legend = F) +
+# mapview(bmore_tracts_no_parks)
+```
+
+Our starting and ending points must be in a very specific format for r5. We need columns for 'from_lat', 'from_lon', 'to_lat', and 'to_lon'. We also need a unique identifier for each row.
+
+```{r}
+# make a join version with lat and lon for r5r
+bmore_tracts_join <-
+  bmore_tracts %>%
+  clean_names() %>%
+  dplyr::select(geoid, name, geometry) %>%
+  rename(tract_name = name) %>%
+  st_as_sf() %>%
+  st_transform(4326) %>%
+  st_difference(parks) %>%
+  st_make_valid() %>%
+  mutate(
+    valid_geometry = st_make_valid(geometry),  # Ensure geometries are valid
+    tract_point = st_centroid(valid_geometry),  # Calculate the centroid of the land area,
+    tract_point_lat = st_coordinates(tract_point)[, 2],  # Extract the latitude of the centroid
+    tract_point_lon = st_coordinates(tract_point)[, 1]  # Extract the longitude of the centroid
+  )
+```
+
+### Load student location data
+
+"Through a public records request, we obtained an anonymized database that shows the U.S. Census tract where students lived and the school they attended. There were over 4,000 such combinations. That means more than 4,000 unique trips to school."
+
+The 'student_home_tract_XX' objects hold info about where a student is going and where they are coming from.
+
+There is a row for each combination of home census tract and school in the data.
+
+```{r}
+source("helpers/student_info.R")
+```
+
+### Load MTA stuff
+
+For info on public transit routes we're going to use the MTA's API (via Swiftly) to access route names, shapes and info that we'll join to our routing data.
+
+For this codeblock, you're going to need to obtain an API key from Swiftly and replace 'YOUR-API-KEY' with your actual key, or the code won't work.
+
+```{r}
+source("helpers/mta_info.R")
+```
+
+### Setup r5r
+
+Here, we'll use r5r to calculate travel times between each student's home and school. We'll also use r5r to calculate the latest time students can leave home and still get to school on time.
+
+We'll begin by setting up r5r and loading the necessary data.
+
+Next, we'll define the modes of transit we need GTFS files for and download the GTFS files for today's date.
+
+```{r}
+# start rjava and allocate enough memory for r5r
+rJava::.jinit()
+options(java.parameters = "-Xmx24g") 
+
+# un-comment for session details 
+# rJava::.jcall("java.lang.System", "S", "getProperty", "java.version")
+# session_info()
+# r5r::r5r_sitrep()
+
+
+# Use one of the days we've pulled sample data for
+today <- "2024-10-02"
+# today <- "2024-12-13"
+# today <- "2025-01-17"
+
+# get todays date in the format we need
+# today <- lubridate::today() %>% 
+#   as.character() %>%
+#   str_split(" ") %>% 
+#   map_chr(1)
+
+
+# define the modes of transit we need gtfs files for
+modes <- c("light-rail", "local-bus", "metro")
+```
+
+You'll only need this section if you're starting from scratch.
+
+The code below will make a new subdirectory for the date that you are modeling commutes for, download the GTFS files associated with that date, download .tif elevation data, download an OSM PBF file for Maryland, and crop it down to Baltimore.
+
+```{r}
+# load baltimore shape un-comment if you need to load osm file
+# baltimore_shape <-
+#   tigris::places("Baltimore", state = "MD", class = "city") %>%
+#   filter(NAME == "Baltimore") %>%
+#   st_as_sf()  %>%
+#   st_transform(4326) 
+
+
+# if you're starting from scratch, make sure that you make a new "poa" subdirectory inside of "data/poa/"
+# create a directory for the data
+# dir.create(here::here("data/poa/", today), showWarnings = F)
+
+
+# grab today's GTFS files 
+# lapply(modes, function(x) {
+#   gtfs_url <- paste0("https://feeds.mta.maryland.gov/gtfs/", x)
+#   download.file(gtfs_url, paste0("data/poa/",today, "/", x, "_gtfs.zip"))
+#   })
+
+# grab .tif elevation 
+# tst <- st_read("/Users/greg.morton/Documents/baltimoreBanner/Projects/2024/high_school_transportation/data/NED10M_SpatialMetadata/NED10M_fe2947_October2018.shp") %>% 
+#   st_transform(4326) %>% 
+#   st_set_crs(4326) 
+
+# get osm data for baltimore
+# oe_get("us/maryland", stringsAsFactors = FALSE, quiet = FALSE)
+# oe_download_directory()
+
+# get the bounding box of the baltimore shape
+# area_bbox <- sf::st_bbox(baltimore_shape)
+
+# path to osmosis
+# osmosis_path <- "/opt/homebrew/bin/osmosis"
+# 
+# # path to the large .pbf file
+# large_pbf_path <- "data/poa/maryland-latest.osm.pbf"
+# 
+# 
+# # path where you want to save the smaller .pbf file
+# smaller_pbf <-"data/poa/baltimore_complete_ways_complete_relations.osm.pbf"
+# 
+# # prepare call to osmosis
+# osmosis_cmd <- sprintf(
+#   "%s --read-pbf file=%s --bounding-box completeWays=yes left=%s bottom=%s right=%s top=%s --write-pbf file=%s",
+#   osmosis_path, large_pbf_path,
+#   area_bbox["xmin"], area_bbox["ymin"], area_bbox["xmax"], area_bbox["ymax"],
+#   smaller_pbf
+# )
+# 
+# # call to osmosis
+# system(osmosis_cmd, intern = TRUE)
+
+# copy the OSM PBF files from data/osm_pbf into today's poa directory
+# path = paste0("data/poa/", as.character(today), "/baltimore.osm.pbf")
+
+# file.copy(
+#   from = "data/poa/baltimore_complete_ways_complete_relations.osm.pbf",
+#   to = paste0("data/poa/", as.character(today), "/baltimore.osm.pbf"),
+#   overwrite = TRUE
+# )
+# 
+# # copy .tif file 
+# file.copy(
+#   from = "data/poa/elevation.tif",
+#   to = paste0("data/poa/", as.character(today), "/elevation.tif"),
+#   overwrite = TRUE
+# )
+```
+
+Let's set up our street network!
+
+This object will serve as an input for every modeling function we use going forward. Make sure, especially if you're starting from scratch, that this is not returning a NULL value. You won't be able to move on if it does.
+
+```{r}
+# setup r5r
+r5r_core <- setup_r5(here::here("data/poa", today),
+                     temp_dir = F,
+                     verbose = T,
+                     overwrite = F
+                     )
+
+r5r_core
+```
+
+# Do your own routing analysis or recreate our results.
+
+You have some choices here! You can run the 'Part I' and 'Part II' codeblocks below to either recreate our findings from scratch using one of the `r5r_core` objects we've provided in the repo, or start from scratch with your own `r5r_core` created with newer GTFS data.
+
+For results, you can skip straight to line 559 to download output from our models and recreate our exact findings.
+
+## Part I: Determine the latest time students can leave home and still get to school on time
+
+Before we start modeling which routes students take to school, we need to determine how late they can expect to leave and still make it to school on time. We cannot run the 'detailed_iternaries' function without a departure time.
+
+To do this, we'll use the 'time_travel_matrix' function from r5r to calculate the travel time from each student's home to their school. We'll loop through a range of departure times and find the latest time that still allows the student to arrive at school on time.
+
+```{r}
+# Define modes of transit
+mode <- c("WALK", "TRANSIT") 
+
+# Set the max search time window (e.g., 90 minutes)
+max_search_time <- 150
+
+# Initialize a list to store results
+travel_times_list <- list()
+latest_departure_times <- list()
+latest_travel_times <- list()
+
+# Simplify school data and join with student home tracts
+sst_slim <- sst_new %>% 
+  dplyr::select(name, school_number, am_bell, pm_bell, district_early_release_time) %>% 
+  rename(name_sst = name)
+
+# add bell times to student home tract dat
+student_home_tracts_with_bell_times <- student_home_tracts_23 %>% 
+  left_join(sst_slim, by = c("prog_no" = "school_number")) 
+
+# dynamic date 
+date <- today
+
+# Test with a subset
+sht_bell_test <- 
+  student_home_tracts_with_bell_times 
+
+# western_trips <- sht_bell_test %>% 
+#   filter(name == "Western High") 
+```
+
+### Loop through each student's home and school to find the latest departure time
+
+This is our most complicated bit of code. Since `r5r` needs a departure time to give us detailed routes to school. We use this code to determine the latest time a student can leave home and still make it to school on time.
+
+We loop through each student's home and school, calculate the travel time, and find the latest time they can leave home and still make it to school on time, moving backwards in time in increments of 10 minutes from the opening bell. The latest we'll allow a student to arrive is 5 minutes before the first period bell.
+
+```{r}
+for(i in 1:nrow(sht_bell_test)){
+  
+  # Get one row of data
+  one_row <- sht_bell_test [i, ] %>% 
+    st_drop_geometry() %>% 
+    dplyr::select(-geometry) %>% 
+    dplyr::select(-school_point,
+                  -school_polygon)
+
+  
+  # Prepare data for r5r
+  one_row_test <- one_row %>% 
+    mutate(school_lat_lon = paste0(school_point_lat, ",", school_point_lon),
+           home_tract_lat_lon = paste0(tract_point_lat, ",", tract_point_lon)) %>% 
+    pivot_longer(
+      cols = c("home_tract_lat_lon", "school_lat_lon"),
+      names_to = "coord_type",
+      values_to = "coord") %>% 
+    mutate(id = ifelse(
+      coord_type == "home_tract_lat_lon", 
+      janitor::make_clean_names(census_tract), 
+      str_replace_all(stringr::str_to_lower(program), " ", "_"))
+      ) %>% 
+    mutate(lat = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][1])),
+           lon = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][2]))) %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+    mutate(geometry = st_make_valid(geometry)) %>% 
+    # re-separate lat and lon
+    mutate(lat = st_coordinates(geometry)[, 2],
+           lon = st_coordinates(geometry)[, 1]) %>%
+    dplyr::select(prog_no,
+                  program,
+                  name,
+                  census_tract,
+                  students,
+                  bldg_num,
+                  grades,
+                  type,
+                  coord_type,
+                  id,
+                  lat,
+                  lon,
+                  am_bell,
+                  pm_bell) %>%
+    # five minutes before the bell will be the latest arrival time we'll allow 
+    mutate(latest_arrival = as_hms((am_bell) - 5 * 60)) 
+  
+  # Initialize the latest valid departure time as the earliest possible
+  latest_departure_time <- NA
+  
+  # Prepare data for joining with school data
+  school_join_object <- one_row_test %>% 
+    filter(coord_type != "home_tract_lat_lon") %>% 
+    dplyr::select(id, prog_no, bldg_num, name, type, grades, students, am_bell, pm_bell)
+  
+  # Loop to find the latest valid departure time
+  for (j in seq(from = max_search_time, to = 10, by = -10)) {
+    
+    # start from the earliest possible time (in our case, it'll be 2 hours before the morning bell)
+    departure_time <- as.POSIXct(paste(date, one_row_test[1,]$am_bell), format = "%Y-%m-%d %H:%M:%S") - (j * 60)
+    
+    # Calculate travel time using r5r
+    travel_times <- travel_time_matrix(
+      r5r_core = r5r_core,
+      origins = one_row_test[one_row_test$coord_type == "home_tract_lat_lon", ],
+      destinations = one_row_test[one_row_test$coord_type == "school_lat_lon", ],
+      mode = mode,
+      max_walk_time = 150,
+      departure_datetime = departure_time,
+      # verbose = TRUE
+    ) %>% 
+      mutate(departure_time = departure_time,
+             on_time = travel_time_p50 <= as.numeric(difftime(as.POSIXct(paste(date, one_row_test[1,]$latest_arrival), format = "%Y-%m-%d %H:%M:%S"), departure_time, units = "mins")))
+    
+    # if travel_times is empty, return a departure time an hour before the am bell 
+    
+    if(nrow(travel_times) == 0) {
+      departure_time_broken <- as.POSIXct(paste(date, one_row_test[1,]$am_bell), format = "%Y-%m-%d %H:%M:%S") - (60 * 60)
+      
+      latest_departure_time[[i]] <- departure_time_broken
+    } else
+    
+    # Check if the student can arrive on time
+    if(travel_times$on_time == TRUE & nrow(travel_times > 0)) {
+      
+      # if the arrival is on time, store the departure time and join the data with school data
+      latest_departure_time <- departure_time
+      
+      travel_times_list[[i]] <-
+        travel_times %>% 
+        left_join(school_join_object, by = c("to_id" = "id"))
+      
+      
+    } else {
+      # If arrival time is too late, change the departure time to the next possible time in our sequence and start the loop again
+      print(departure_time)
+      # travel_times$departure_date <- latest_departure_time
+      break
+    }
+  }
+
+# Store the result
+latest_departure_times[[i]] <- latest_departure_time
+
+print(paste("Iteration", i, "complete.", "Latest departure time:", latest_departure_time))
+
+gc()
+
+}
+
+# # save travel times list in case something goes wrong 
+# write_rds(travel_times_list, paste0("data/poa/", today, "/travel_times_list.rds"))
+```
+
+## Part II: Detailed Routing
+
+Now that we basically know the parameters for our routing, we can model the actual routes students take to school. We'll use the 'detailed_itineraries' function from r5r to calculate the routes students take to school.
+
+We'll save each detailed route as a csv and load it back in to visualize the routes.
+
+```{r}
+### Load data
+travel_times_from_student_home_tracts <-
+  travel_times_list %>%
+  bind_rows()  %>%
+  mutate(arrival_time = departure_time + travel_time_p50 * 60)
+
+# here's our save point
+write_rds(travel_times_from_student_home_tracts, paste0("data/poa/", today, "/travel_times_df.rds"))
+
+travel_times_from_student_home_tracts %>% 
+  summarise(mean_travel_time = weighted.mean(travel_time_p50, students, na.rm = T),
+            median_travel_time = median(travel_time_p50, students, na.rm = T),
+            sd_travel_time = sd(travel_time_p50, na.rm = T),
+            min_travel_time = min(travel_time_p50),
+            max_travel_time = max(travel_time_p50)) 
+
+
+
+latest_leaving_times_for_detailed_routing <- 
+  travel_times_from_student_home_tracts %>% 
+  mutate(prog_no = as.character(prog_no),
+         from_id = str_remove_all(from_id, "x")
+         # # convert arrival and departure times to EST
+         # arrival_time = as.POSIXct(arrival_time, tz = "UTC") - hours(4),
+         # departure_time = as.POSIXct(departure_time, tz = "UTC") - hours(4)
+         ) %>% 
+  left_join(student_home_tracts_23, 
+            by = c(
+              "from_id" = "census_tract",
+              "prog_no" = "prog_no",
+              "grades" = "grades",
+              "name" = "name",
+              "type" = "type",
+              "students" = "students",
+              "bldg_num" = "bldg_num"
+            ))  %>% 
+  rename(census_tract = from_id)
+```
+
+### Transit
+
+We'll start by modeling transit routes. In terms of actual code, this is actually a lot simpler than determining the latest departure time. We'll loop through each row in our data and use the 'detailed_itineraries' function to calculate the routes students take to school.
+
+From there, we'll save each detailed route as a csv and load it back in to visualize the routes.
+
+Output directory is hardcoded so just remember to change the output destination to the correct folder for the day you're modeling
+
+```{r}
+# Define modes of transit that we'll give our commuters access to 
+mode <- c("WALK", "TRANSIT") 
+
+for(i in 1:nrow(latest_leaving_times_for_detailed_routing)){
+  
+  one_row <- latest_leaving_times_for_detailed_routing[i,]
+  
+  one_row_test <-
+  one_row %>% 
+    mutate(school_lat_lon = paste0(school_point_lat, ",", school_point_lon),
+           home_tract_lat_lon = paste0(tract_point_lat, ",", tract_point_lon)) %>% 
+    pivot_longer(
+      cols = c("home_tract_lat_lon", "school_lat_lon"),
+      names_to = "coord_type",
+      values_to = "coord") %>% 
+    mutate(id = ifelse(
+      coord_type == "home_tract_lat_lon", 
+      janitor::make_clean_names(census_tract), 
+      str_replace_all(stringr::str_to_lower(program), " ", "_"))
+      ) %>% 
+    mutate(lat = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][1])),
+           lon = map_dbl(.$coord, ~as.double(str_split(., ",")[[1]][2]))) %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+    mutate(geometry = st_make_valid(geometry)) %>% 
+    # re-separate lat and lon
+    mutate(lat = st_coordinates(geometry)[, 2],
+           lon = st_coordinates(geometry)[, 1]) %>%
+    dplyr::select(prog_no,
+                  program,
+                  name,
+                  census_tract,
+                  students,
+                  bldg_num,
+                  grades,
+                  type,
+                  coord_type,
+                  id,
+                  lat,
+                  lon,
+                  am_bell,
+                  pm_bell)
+  
+  # make detailed routes directory inside of today's poa folder
+  dir.create(here::here("data/poa", today, "detailed-routes"), showWarnings = F)
+
+  df <- 
+    detailed_itineraries(
+      r5r_core,
+      origins = one_row_test[1,],
+      destinations = one_row_test[2,],
+      mode = mode,
+      departure_datetime = one_row$departure_time,
+      shortest_path = T,
+      output_dir = here::here("data/poa", today, "detailed-routes")
+      )
+  
+  gc()
+  
+  Sys.sleep(0.1)
+  
+}
+```
+
+# Read each csv file into a list of dataframes
+
+```{r}
+# read in the csv files
+file_path <- paste0("data/poa/",
+                    today,
+                    "/detailed-routes")
+
+file_paths <- list.files(here::here(file_path), full.names = T) %>% unique
+
+df_list <- list()
+
+df_list <- lapply(file_paths, read_csv)
+
+```
+
+# Combine the dataframes into one
+
+```{r}
+school_list <-
+  df_list %>% 
+  # mutate all from_id and to_id to character
+  map(~mutate(.x, from_id = as.character(from_id), to_id = as.character(to_id))) %>%
+  map(~mutate(.x, to_id = map_chr(to_id, ~str_remove_all(.x, "stop:")))) %>% 
+  map(~mutate(.x, to_lat = as.character(to_lat), to_lon = as.character(to_lat))) %>% 
+  map(~mutate(.x, departure_time = as.character(departure_time))) %>%
+  map(~mutate(.x, total_distance = as.numeric(total_distance))) %>% 
+  map(~mutate(.x, mode = as.character(mode))) %>% 
+  map(~mutate(.x, wait = as.numeric(wait))) %>%
+  # map(~mutate(.x, route = as.character(route))) %>%
+  bind_rows() %>% 
+  group_by(from_id, to_id) %>%
+  mutate(row_num = row_number(),
+         from_id = str_remove_all(from_id, "x")
+  )
+```
+
+## Produce summaries for every trip to school
+
+This is the data that we are ultimately after. Now that we'ved used r5r to calculate the routes students take to school, we can summarize the data to get a better understanding of how students get to school.
+
+For each tract/school combination, we'll calculate the total duration and distance of the trip, the number of trip legs, the time spent on each mode of transit, and the distance traveled on each mode of transit.
+
+```{r}
+# produce all trips file
+all_trips <- 
+  school_list %>%   
+  mutate(route = as.character(route)) %>% 
+  group_by(from_id, to_id) %>% 
+  left_join(all_routes, by = c("route" = "id")) %>% 
+  summarise(
+    from_id = from_id[1],
+    to_id = to_id[1],
+    total_duration = total_duration[1],
+    total_distance = total_distance[1],
+    routes = list(route),
+    short_names = list(short_name),
+    modes = list(mode),
+    trip_legs = max(segment),
+    routes = list(route),
+    bus_time = sum(segment_duration[mode == "BUS"], na.rm = T),
+    bus_distance = sum(distance[mode == "BUS"], na.rm = T),
+    walk_time = sum(segment_duration[mode == "WALK"], na.rm = T),
+    walk_distance = sum(distance[mode == "WALK"], na.rm = T),
+    subway_time = sum(segment_duration[mode == "SUBWAY"], na.rm = T),
+    subway_distance = sum(distance[mode == "SUBWAY"], na.rm = T),
+    light_rail_time = sum(segment_duration[mode == "TRAM"], na.rm = T),
+    light_rail_distance = sum(distance[mode == "TRAM"], na.rm = T),
+    wait = sum(wait, na.rm = T)
+  ) %>% 
+  ungroup() %>% 
+  arrange(desc(trip_legs)) %>% 
+  mutate(census_tract = str_remove_all(from_id, "x")) %>% 
+  mutate(census_tract = as.numeric(census_tract)) %>%
+  # select(from_id:to_id, everything()) %>% 
+  # convert distance in meters to miles
+  mutate(total_distance = total_distance * 0.000621371, 
+         bus_distance = bus_distance * 0.000621371,
+         walk_distance = walk_distance * 0.000621371,
+         subway_distance = subway_distance * 0.000621371,
+         light_rail_distance = light_rail_distance * 0.000621371) %>% 
+  left_join(enrollment_23, by = c("to_id" = "program_join")) %>% 
+  dplyr::select(census_tract, name, everything()) %>% 
+  dplyr::select(-from_id) %>%
+  mutate(census_tract = as.character(census_tract)) %>% 
+  left_join(enrollment_by_tract, by = 
+              c("census_tract" = "census_tract",
+                "name" = "name"))  
+
+all_trips
+```
+
+```{r}
+
+travel_times_from_student_home_tracts <- 
+  read_rds(paste0("data/poa/", today, "/travel_times_df.rds"))
+
+detailed_trip_summaries_every_school <-
+  travel_times_from_student_home_tracts %>%
+  mutate(census_tract = str_remove_all(from_id, "x")) %>%
+  mutate(prog_no = as.character(prog_no)) %>%
+  left_join(all_trips, by = c("census_tract" = "census_tract",
+                              "to_id" = "to_id",
+                              "type" = "type",
+                              "prog_no" = "prog_no",
+                              "name" = "name",
+                              "students" = "students",
+                              "grades" = "grades"
+                              )) %>%
+  dplyr::select(from_id, name, travel_time_p50, total_duration, everything())
+
+
+
+
+# how many students on each route?
+most_popular_routes <- 
+  detailed_trip_summaries_every_school %>%
+  filter(!is.na(routes)) %>%
+  mutate(routes = map(routes, ~unique(.x))) %>%
+  clean_names() %>% 
+  dplyr::select(routes, students, to_id, census_tract) %>% 
+  unnest() %>% 
+  distinct(to_id, census_tract, routes, .keep_all = T) %>% 
+  group_by(routes) %>% 
+    summarise(n = n(),
+              total_students = sum(students)) %>% 
+  left_join(all_routes, by = c("routes" = "id")) %>% 
+  ungroup() %>% 
+  rename(total_routes = n) %>% 
+  # mutate(pct_of_trips = n/sum(n) * 100,
+  #        sum = sum(pct_of_trips)
+  # ) %>% 
+  arrange(desc(total_students)) %>% 
+  filter(!is.na(name)) 
+
+  
+# what are the most used routes to school? How many trips rely on each route?
+most_used_routes <- 
+  detailed_trip_summaries_every_school %>% 
+  filter(!is.na(routes)) %>%
+  mutate(routes = map(routes, ~unique(.x))) %>%
+  clean_names() %>% 
+  dplyr::select(routes) %>% 
+  unnest() %>% 
+  group_by(routes) %>% 
+  summarise(n = n()) %>% 
+  filter(!is.na(routes)) %>%
+  left_join(all_routes, by = c("routes" = "id")) %>% 
+  ungroup() %>% 
+  arrange(desc(n)) %>%
+  mutate(pct_of_trips = n/sum(n) * 100,
+         sum = sum(pct_of_trips)
+  )
+
+```
+
+```{r}
+trip_summaries <- 
+ detailed_trip_summaries_every_school %>% 
+  # count instances of the string "WALK" in the modes column
+  mutate(walk_instances = map_dbl(modes, ~sum(str_detect(.x, "WALK"))),
+         transfers = ifelse(walk_instances -2 > 0, walk_instances - 2, 0),
+         legs = map_dbl(modes, ~length(.x))
+         ) %>% 
+  summarise(
+    enrollment_approx = sum(students, na.rm = T),
+    # enrollment_actual = enrollment[1],
+    total_duration = weighted.mean(total_duration, students, na.rm = T),
+    bus_use_pct = sum(students[str_detect(modes, "BUS")])/enrollment_approx * 100,
+    light_rail_use_pct = sum(students[str_detect(modes, "TRAM")])/enrollment_approx * 100,
+    subway_use_pct = sum(students[str_detect(modes, "SUBWAY")])/enrollment_approx * 100,
+    pct_students_greater_than_0_transfer = sum(students[transfers > 0])/enrollment_approx * 100,
+    pct_students_greater_than_1_transfer = sum(students[transfers > 1])/enrollment_approx * 100,
+    transfers = weighted.mean(transfers, students, na.rm = T),
+    legs = weighted.mean(legs, students, na.rm = T),
+    # average number of unique modes per trip
+    avg_modes = weighted.mean(map_dbl(modes, ~length(unique(.x))), students, na.rm = T),
+    # weighted averages of time and distance total, and by segment for all trips. Weighted by students
+    total_distance = weighted.mean(total_distance, students, na.rm = T),
+    median_walk_time = median(walk_time, students, na.rm = T),
+    walk_time = weighted.mean(walk_time, students, na.rm = T),
+    walk_distance = weighted.mean(walk_distance, students, na.rm = T),
+    median_bus_time = median(bus_time, students, na.rm = T),
+    mean_bus_time = weighted.mean(bus_time, students, na.rm = T),
+    bus_distance = weighted.mean(bus_distance, students, na.rm = T),
+    median_subway_time = median(subway_time, students, na.rm = T),
+    mean_subway_time = weighted.mean(subway_time, students, na.rm = T),
+    subway_distance = weighted.mean(subway_distance, students, na.rm = T),
+    median_light_rail_time = median(light_rail_time, students, na.rm = T),
+    mean_light_rail_time = weighted.mean(light_rail_time, students, na.rm = T),
+    light_rail_distance = weighted.mean(light_rail_distance, students, na.rm = T)
+  ) 
+```
+
+# What % of students travel longer than 45 minutes to school? Longer than one hour? Longer than 30 minutes on the bus?
+
+```{r}
+#citywide 
+unweighted_trip_summaries <-
+detailed_trip_summaries_every_school %>% 
+  mutate(walk_instances = map_dbl(modes, ~sum(str_detect(.x, "WALK"))),
+       transfers = ifelse(walk_instances -2 > 0, walk_instances - 2, 0),
+       legs = map_dbl(modes, ~length(.x))
+       ) %>% 
+  summarise(
+    n = n(),
+    enrollment_approx = sum(students, na.rm = T),
+    avg_total_duration = weighted.mean(total_duration, students, na.rm = T),
+    avg_total_total_distance = weighted.mean(total_distance, students, na.rm = T),
+    pct_trips_longer_than_30 = sum(total_duration > 30, na.rm = T)/n() * 100,
+    pct_trips_longer_than_45 = sum(total_duration > 45, na.rm = T)/n() * 100,
+    pct_trips_longer_than_60 = sum(total_duration > 60, na.rm = T)/n() * 100,
+    pct_trips_longer_than_30_bus = sum(bus_time > 30, na.rm = T)/n() * 100,
+    pct_trips_longer_than_45_bus = sum(bus_time > 45, na.rm = T)/n() * 100,
+    pct_trips_longer_than_30_walk = sum(walk_time > 30, na.rm = T)/n() * 100,
+    pct_trips_longer_than_45_walk = sum(walk_time > 45, na.rm = T)/n() * 100,
+    pct_trips_with_at_least_one_transfer = sum(transfers > 0, na.rm = T)/n() * 100,
+    pct_trips_with_more_than_one_transfer = sum(transfers > 1, na.rm = T)/n() * 100,
+    pct_trips_with_more_than_two_transfers = sum(transfers > 2, na.rm = T)/n() * 100
+  ) 
+
+unweighted_trip_summaries
+```
+
+```{r}
+# by school
+detailed_trip_summaries_by_school <- 
+  detailed_trip_summaries_every_school %>% 
+  group_by(name, prog_no) %>%
+  mutate(walk_instances = map_dbl(modes, ~sum(str_detect(.x, "WALK"))),
+       transfers = ifelse(walk_instances -2 > 0, walk_instances - 2, 0),
+       legs = map_dbl(modes, ~length(.x))
+       ) %>% 
+  summarise(
+    routes = n(),
+    enrollment_approx = sum(students, na.rm = T),
+    avg_total_duration = weighted.mean(total_duration, students, na.rm = T),
+    avg_total_total_distance = weighted.mean(total_distance, students, na.rm = T),
+    pct_trips_longer_than_30 = sum(total_duration > 30, na.rm = T)/n() * 100,
+    pct_trips_longer_than_45 = sum(total_duration > 45, na.rm = T)/n() * 100,
+    pct_trips_longer_than_60 = sum(total_duration > 60, na.rm = T)/n() * 100,
+    pct_trips_longer_than_30_bus = sum(bus_time > 30, na.rm = T)/n() * 100,
+    pct_trips_longer_than_45_bus = sum(bus_time > 45, na.rm = T)/n() * 100,
+    pct_trips_longer_than_30_walk = sum(walk_time > 30, na.rm = T)/n() * 100,
+    pct_trips_longer_than_45_walk = sum(walk_time > 45, na.rm = T)/n() * 100,
+    pct_trips_with_at_least_one_transfer = sum(transfers > 0, na.rm = T)/n() * 100,
+    pct_trips_with_more_than_one_transfer = sum(transfers > 1, na.rm = T)/n() * 100,
+    pct_trips_with_more_than_two_transfers = sum(transfers > 2, na.rm = T)/n() * 100
+  ) %>%  
+  arrange(desc(pct_trips_longer_than_30_bus))  %>% 
+  arrange(desc(routes))
+
+# max for every school
+
+longest_trip_every_school <- 
+  detailed_trip_summaries_every_school %>% 
+  group_by(name, prog_no) %>%
+  mutate(walk_instances = map_dbl(modes, ~sum(str_detect(.x, "WALK"))),
+       transfers = ifelse(walk_instances -2 > 0, walk_instances - 2, 0),
+       legs = map_dbl(modes, ~length(.x))
+       ) %>% 
+  summarise(
+    routes = n(),
+    enrollment_approx = sum(students, na.rm = T),
+    max_total_duration = max(total_duration, na.rm = T),
+    max_total_distance = max(total_distance, na.rm = T)
+  ) 
+```
+
+```{r}
+# by tract 
+average_trip_by_tract <-
+  detailed_trip_summaries_every_school %>% 
+  group_by(census_tract) %>% 
+  mutate(walk_instances = map_dbl(modes, ~sum(str_detect(.x, "WALK"))),
+       transfers = ifelse(walk_instances -2 > 0, walk_instances - 2, 0),
+       legs = map_dbl(modes, ~length(.x))
+       ) %>% 
+  summarise(
+    enrollment_approx = sum(students, na.rm = T),
+    avg_total_duration = weighted.mean(total_duration, students, na.rm = T),
+    avg_total_total_distance = weighted.mean(total_distance, students, na.rm = T),
+    pct_students_longer_than_30 = sum(total_duration > 30, na.rm = T)/n() * 100,
+    pct_students_longer_than_45 = sum(total_duration > 45, na.rm = T)/n() * 100,
+    pct_students_longer_than_60 = sum(total_duration > 60, na.rm = T)/n() * 100,
+    pct_students_longer_than_30_bus = sum(bus_time > 30, na.rm = T)/n() * 100,
+    pct_students_longer_than_45_bus = sum(bus_time > 45, na.rm = T)/n() * 100,
+    pct_students_longer_than_30_walk = sum(walk_time > 30, na.rm = T)/n() * 100,
+    pct_students_longer_than_45_walk = sum(walk_time > 45, na.rm = T)/n() * 100,
+    pct_students_with_at_least_one_transfer = sum(transfers > 0, na.rm = T)/n() * 100,
+    pct_students_with_more_than_one_transfer = sum(transfers > 1, na.rm = T)/n() * 100,
+    pct_students_with_more_than_two_transfers = sum(transfers > 2, na.rm = T)/n() * 100
+  ) %>% 
+  arrange(desc(pct_students_longer_than_30_bus)) 
+```
+
+# what time does the average student begin their commute? Median? Mode?
+
+```{r}
+departure_times_by_am_bell_time <- 
+  detailed_trip_summaries_every_school %>% 
+  group_by(am_bell) %>% 
+  summarise(students = sum(students),
+            mean_departure_time = mean(departure_time, na.rm = T),
+            median_departure_time = median(departure_time, na.rm = T),
+            earliest_departure_time = min(departure_time, na.rm = T),
+            latest_departure_time = max(departure_time, na.rm = T)
+            # most_common_departure_time = mode(departure_time, na.rm = T)
+            ) 
+
+# for all students 
+departure_times_all_students <- 
+  detailed_trip_summaries_every_school %>% 
+  # group_by(am_bell) %>% 
+  summarise(students = sum(students),
+            mean_departure_time = mean(departure_time, na.rm = T),
+            median_departure_time = median(departure_time, na.rm = T),
+            earliest_departure_time = min(departure_time, na.rm = T),
+            latest_departure_time = max(departure_time, na.rm = T)
+            # most_common_departure_time = mode(departure_time, na.rm = T)
+            )
+departure_times_by_am_bell_time
+
+departure_times_all_students
+```
+
+Make sure to shut down r5r or restart your R session when you're finished.
+
+```{r}
+# Remember to stop r5r and rJava when you're done
+# stop r5r
+r5r::stop_r5(r5r_core)
+rJava::.jgc(R.gc = TRUE)
+```

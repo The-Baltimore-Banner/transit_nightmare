@@ -1,0 +1,58 @@
+---
+title: "OTP fact check"
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(kableExtra)
+```
+
+"Our analysis found that one in four buses students try to board during their morning commutes won’t be on time or won’t show up at all. In the afternoon, service is worse."
+
+"While there’s no national standard, it’s more common for large urban transit agencies — like the New York Transit System, for example — to define “on time” as up to one minute early and five minutes late. By that measure, only 62% of Baltimore buses are on time in during students’ morning commutes; it’s 51% in the afternoon."
+
+"When they miss a connection, they wait an average of 20 minutes — in many cases, 35 minutes — for the next bus to arrive"
+
+While there’s no national standard, it’s more common for large urban transit agencies — like the New York Transit System, for example — to define “on time” as up to one minute early and five minutes late. By that measure, only 62% of Baltimore buses are on time in during students’ morning commutes; it’s 52% in the afternoon.
+
+```{r}
+# you're going to have to run the combine_stops_and_schedules object to create this object
+summary_morning_otp <- 
+  read_csv("data/output/morning_otp_02_12.csv")
+
+summary_afternoon_otp <-
+  read_csv("data/output/afternoon_otp_02_12.csv")
+
+# morning 
+summary_morning_otp %>% 
+  kbl() %>% 
+  kable_material_dark()
+
+# afternoon
+summary_afternoon_otp %>% 
+  kbl() %>% 
+  kable_material_dark()
+```
+
+Certain bus lines are more problematic than others. On the No. 22 line, for example, 1 in 3 buses is too early or late, The Banner’s analysis found. As many as 3,300 students who attend 33 different schools may ride that line for at least part of their journey.
+
+```{r}
+morning_otp_line <- 
+  read_rds("data/output/morning_otp_by_line_02_14.rds")
+
+morning_otp_line %>% 
+  filter(str_detect(route_name, "22"))
+```
+
+Digital Harbor, for instance, enrolls more than 1,500 kids who don’t live close enough to walk. The 20 buses, on average, that stop within half a mile of the school each morning can only fit 1,200 kids — and that’s if no one but students ride them.
+
+```{r}
+
+are_there_enough_buses <- 
+  read_rds("data/output/are_there_enough_buses_within_30_02_14.rds")
+
+are_there_enough_buses %>% 
+  filter(str_detect(name, "Digital"))
+
+```

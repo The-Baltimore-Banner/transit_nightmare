@@ -1,0 +1,353 @@
+---
+title: "get remaining files from s3"
+editor: visual
+---
+
+### Load packages
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(units)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+library(purrr)
+library(rcartocolor)
+library(viridis)
+library(DHARMa)
+library(mgcv)
+library(MASS)
+library(gratia)
+library(mapview)
+library(mgcViz)
+library(nngeo)
+library(hms)
+library(aws.s3)
+library(jsonlite)
+library(rvest)
+library(httr)
+library(r5r)
+library(rJava)
+library(paws)
+library(janitor)
+library(data.table)
+library(future.apply)
+library(readxl)
+library(here)
+library(furrr)
+source("functions/mta_api_functions.R")
+
+# turn off scientific notation 
+options(scipen = 999)
+
+# set up parallel processing
+plan(multisession, workers = parallel::detectCores() - 1)  
+
+
+```
+
+```{r}
+
+hours_of_interest <- c("05", "06","07", "08", "09", "10", "11", "12", "13", "14", "15", "16")
+
+# make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 1/14, excluding weekends 
+#holidays and weekends to remove
+# make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 12/02, excluding weekends 
+#holidays and weekends to remove
+all_holidays <- 
+  c("2017-09-04", "2017-09-21", "2017-09-22", "2017-10-09",
+    "2017-11-10", "2017-11-23", "2017-11-24", "2017-12-22",
+    "2017-12-25", "2017-12-26", "2017-12-27", "2017-12-28",
+    "2017-12-29", "2018-09-03", "2018-09-10", "2018-09-19",
+    "2018-09-20", "2018-11-12", "2018-11-22", "2018-11-23",
+    "2018-12-24", "2018-12-25", "2018-12-26", "2018-12-27",
+    "2018-12-28", "2018-12-31", "2019-09-02", "2019-09-30",
+    "2019-10-01", "2019-10-09", "2019-10-14", "2019-11-11",
+    "2019-11-27", "2019-11-28", "2019-11-29", "2019-12-23",
+    "2019-12-24", "2019-12-25", "2020-01-01", "2020-01-20",
+    "2020-02-17", "2020-04-10", "2020-05-25", "2020-06-05",
+    "2020-06-11", "2020-06-12", "2020-06-15", "2020-06-16",
+    "2020-06-17", "2020-06-18", "2020-06-19", "2021-01-01",
+    "2021-01-18", "2021-02-15", "2021-04-02", "2021-05-31",
+    "2021-06-18", "2021-06-21", "2021-06-22", "2021-06-23",
+    "2021-06-24", "2021-06-25", "2022-01-17", "2022-02-21",
+    "2022-04-15", "2022-05-30", "2022-06-17", "2022-06-20",
+    "2022-06-21", "2022-06-22", "2022-06-23", "2022-06-24",
+    "2022-09-05", "2022-11-11", "2022-11-24", "2022-11-25",
+    "2023-01-01", "2023-01-07", "2023-01-08", "2023-01-14",
+    "2023-01-15", "2023-01-21", "2023-01-22", "2023-01-28",
+    "2023-01-29", "2023-02-04", "2023-02-05", "2023-02-11",
+    "2023-02-12", "2023-02-18", "2023-02-19", "2023-02-25",
+    "2023-02-26", "2023-03-04", "2023-03-05", "2023-03-11",
+    "2023-03-12", "2023-03-18", "2023-03-19", "2023-03-25",
+    "2023-03-26", "2023-04-01", "2023-04-02", "2023-04-08",
+    "2023-04-09", "2023-04-15", "2023-04-16", "2023-04-22",
+    "2023-04-23", "2023-04-29", "2023-04-30", "2023-05-06",
+    "2023-05-07", "2023-05-13", "2023-05-14", "2023-05-20",
+    "2023-05-21", "2023-05-27", "2023-05-28", "2023-06-03",
+    "2023-06-04", "2023-06-10", "2023-06-11", "2024-09-02",
+    "2024-10-18", "2024-11-04", "2024-11-05"
+    ) %>% 
+  ymd() %>% as_date
+
+breaks <- c(ymd("2017-03-24"):ymd("2017-04-03"), ymd("2017-06-16"):ymd("2017-09-05"),
+            ymd("2018-03-30"):ymd("2018-04-06"), ymd("2018-06-15"):ymd("2018-09-04"),
+            ymd("2019-04-19"):ymd("2019-04-26"), ymd("2019-06-14"):ymd("2019-09-03"),
+            ymd("2020-04-06"):ymd("2020-04-13"), ymd("2020-06-15"):ymd("2020-09-08"),
+            ymd("2021-03-26"):ymd("2021-04-05"), ymd("2021-06-21"):ymd("2021-09-08"),
+            ymd("2022-04-15"):ymd("2022-04-22"), ymd("2022-06-20"):ymd("2022-09-06"),
+            ymd("2022-12-22"):ymd("2023-01-04"), ymd("2024-11-27"):ymd("2024-11-30"),
+            ymd("2024-12-23"):ymd("2025-01-06")
+            ) %>% 
+  as_date()
+
+to_rm <- c(all_holidays, breaks) %>% as_date
+
+to_rm <- c(all_holidays, breaks) %>% as_date
+
+
+# grab our data range (i.e. weekdays from the first day of school until Monday, December 2nd)
+weekend <-
+  seq.Date(from = as.Date("2024-08-26"), to = as.Date("2025-01-14"), by = "day") %>%
+  # filter for dates that fall during a weekday
+  tibble(date = .) %>%
+  filter(weekdays(date) %in% c("Saturday", "Sunday")) %>%
+  pull(date) %>% 
+  as_date()
+
+# filter them out of dates 
+
+dates_for_processing <- 
+  seq.Date(from = as.Date("2024-08-26"), to = as.Date("2025-01-14"), by = "day") %>%
+  .[! . %in% to_rm] %>% 
+  .[! . %in% weekend] %>% 
+  as.character()
+
+
+```
+
+### Load the data
+
+```{r}
+# # make a list of dates ("YYYY-MM-DD") for the days between 8/26 and 12/02, excluding weekends 
+# dates <- seq(as.Date("2024-08-26"), as.Date("2024-12-02"), by = "day") %>% 
+#   .[!weekdays(.) %in% c("Saturday", "Sunday")]
+
+# grab desktop path (insert your own path to the jsons)
+local_path <- "/Users/your.name/Desktop/bus-positions/school-transportation/vehicle-positions/json"
+
+# get all the day folders as a list we can iterate over 
+day_folders <-
+  list.files(local_path, full.names = TRUE) %>% 
+  # filter out any files that are not directories
+  .[file.info(.)$isdir] %>% 
+  tibble() %>% 
+  clean_names() %>% 
+  pull(x)
+```
+
+# filter to find the files I need to process
+
+```{r}
+# write a loop to get number of files in each day folder 
+results_list <- list()
+# Loop through each day folder
+for (day_folder in day_folders) {
+  # Get all the hour folders in the current day folder
+  hour_folders <- list.files(day_folder, full.names = TRUE)
+  
+  # Get the number of JSON files in each hour folder
+  hour_files <- sapply(hour_folders, function(hour_folder) {
+    length(list.files(hour_folder, full.names = TRUE))
+  })
+  
+  
+  # Create a tibble for the current day folder
+  day_data <- tibble(
+    day_folder = basename(day_folder),
+    hour_folder = basename(hour_folders),
+    num_json_files = hour_files
+  )
+  
+  # Append the data to the results list
+  results_list[[day_folder]] <- day_data
+}
+
+# Combine all the results into a single dataframe
+final_results <- bind_rows(results_list, .id = "day_path")
+
+
+files_i_want <- 
+  final_results %>% 
+  filter(day_folder %in% dates,
+         str_sub(hour_folder, -2) %in% hours_of_interest) %>% 
+  # get character count for 'day_path'
+  mutate(day_path_len = nchar(day_path),
+         day_and_hour = paste0(day_path, "/", hour_folder))
+
+
+```
+
+# list every single json file in every file path in the files_i_want\$day_and_hour column
+
+```{r}
+# get all the json files in the day_and_hour column
+json_files <- files_i_want$day_and_hour %>% 
+  map(~ list.files(.x, full.names = TRUE, pattern = "\\.json$", recursive = TRUE)) %>% 
+  unlist()
+
+json_files_table <- 
+  json_files %>% 
+  tibble() %>% 
+  clean_names()
+```
+
+```{r}
+# # Determine all possible columns
+all_columns <- read_rds("data/setup/all_columns.rds")
+
+
+read_and_standardize <- function(file, all_columns) {
+  
+  # extract everything after the last '/' in the file path
+  file_name <- 
+    str_extract(file, "[^/]*$") %>% str_remove(".json")
+  
+  # grab last 6 characters of file name
+  file_time <- 
+    substr(file_name, nchar(file_name) - 5, nchar(file_name)) %>% as_datetime(format = "%H%M%S") %>% hms::as_hms() %>% as.character() %>% str_replace_all(":", "-")
+  
+  file_date <- 
+    substr(file_name, 16, nchar(file_name) - 6) %>% as.Date(format = "%Y%m%d")
+
+  data <- 
+    fromJSON(file, simplifyDataFrame = TRUE)
+
+  if (is.list(data)) data <- as.data.frame(data)
+
+  missing_cols <- setdiff(all_columns, colnames(data))
+  data[missing_cols] <- NA
+  data <- data[all_columns]
+  
+  data$source_file <- file
+  
+
+  
+  # # create a date folder if it doesn't exist (replace with your own)
+  if(!dir.exists(paste0("/Users/greg.morton/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", file_date))) {
+    
+    # replace path with your own
+    dir.create(paste0("/Users/greg.morton/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", file_date), recursive = TRUE)
+    
+    message(paste0("created folder for ", file_date),"...")
+    
+  }
+  # print(file_date)
+
+  data <-
+  data %>%
+  unnest(entity.vehicle) %>%
+  unnest(position) %>%
+  unnest(trip) %>%
+  unnest(vehicle) %>%
+  clean_names() %>%
+  mutate(
+    header_timestamp = as_datetime(as.double(header_timestamp)),
+    timestamp = as_datetime(as.double(timestamp)),
+    timestamp = with_tz(timestamp, "America/New_York"),
+    header_timestamp = with_tz(header_timestamp, "America/New_York"),
+    hour = hour(timestamp),
+    minute = minute(timestamp),
+    second = second(timestamp)
+  )
+  
+
+  # replace with your file path (i'm keeping it out of the repo to make my code a little more efficient)
+  write_rds(data, paste0("/Users/your.name/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", file_date, "/", file_date, "-", file_time, ".rds"))
+  
+}
+
+
+invisible(future_lapply(json_files, read_and_standardize, all_columns = all_columns))
+```
+
+# write a folder to grab, combine, and process but location data by day
+
+```{r}
+
+
+process_bus_data_by_day <- 
+  function(date) {
+  
+  # get all the files in the date folder
+  # replace file path with your own
+  files <- list.files(paste0("/Users/your.name/Desktop/bus-positions/school-transportation/processed_bus_data/December_6_2024/", date), full.names = TRUE, pattern = "\\.rds$", recursive = TRUE) 
+
+  # # processing start message
+  message("processing ", date)
+
+  # # read in all the files
+  data <- future_lapply(files, read_rds) %>%
+    bind_rows() %>% 
+  #   # begin by identifying bus locations with a NULL 'neartype' value.
+    mutate(no_route_id = is.na(route_id)) %>%
+    # next, we're going to remove underscores from the 'nearstopid' variable. This is to make it a bit easier to join to our 'D_stops' object later on down the line
+    mutate(stop_id = str_remove_all(stop_id, "_.*")) %>%
+    # for a bus, on a route, near a stop...
+    group_by(id, label, trip_id, route_id, stop_id, start_date) %>%
+    # ...we'll arrange the data by time reported. This should give us an idea of the route a bus traveled as it made its planned trip.
+    arrange(timestamp) %>% 
+    mutate(row_number = row_number()) %>%
+    # mutate a new column that tells me the last time the bus was near a stop
+    mutate(
+      # for our variable "lasts_stop", we'll use Darwin's method of determining the last stop.
+      # We'll take the location where the bus is closest to the stop and in cases where there are multiple matches, take the one with the earliest time
+      last_stop = case_when(as.numeric(speed) == min(as.numeric(speed))~TRUE),
+      # we'll also create another variable using james method of simply grabbing the bus's last recorded location before its next stop changed.
+      # # we can compare results from the two methods later
+      last_stop_james = case_when(row_number() == max(row_number) ~ TRUE),
+      max_row = max(row_number)
+      ) %>% 
+    ungroup() %>%
+    # use the "last_stop" variable we created to tell us when the bus was closest to each stop along its route during a trip
+    filter(last_stop_james == TRUE) %>%
+    filter(!is.na(trip_id)) %>% 
+    group_by(id, label, trip_id, route_id, stop_id, start_date) %>%
+    # when there are multiple matches for "last_stop", keep the latest one
+    filter(timestamp == min(timestamp)) %>%
+    # ungroup the data
+    ungroup() %>%
+    mutate(route_id = as.character(route_id),
+       trip_id = as.character(trip_id),
+       start_date = as.character(start_date),
+       timestamp = with_tz(timestamp, "America/New_York"))
+  # for now we're going to skip turning it into an SF object because it's wayyyyyyy too computationally expensive for this many rows 
+  #   st_as_sf(coords = c("longitude","latitude"))  %>%
+  #   st_set_crs(4326)
+  # 
+  # # write our combined data back to source folder 
+  # replace file path with your own
+  write_rds(data, paste0("/Users/your.name/Desktop/bus-positions/school-transportation/processed_bus_data/processed_stops_by_date/", date, ".rds"))
+    
+  # return(data)
+  
+  # print message 
+  message("finished processing ", date)
+
+  
+  }
+
+# test on one day 
+# ni_hao <-system.time(process_bus_data_by_day("2024-12-13"))
+```
+
+# Process data for our dates
+
+```{r}
+length(dates_for_processing)
+
+dates_for_processing %>% 
+  future_lapply(process_bus_data_by_day)
+```

@@ -1,0 +1,348 @@
+---
+title: "Prepare Schedule Data"
+editor: visual
+---
+
+### Load packages
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(units)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+library(purrr)
+library(rcartocolor)
+library(viridis)
+library(DHARMa)
+library(mgcv)
+library(MASS)
+library(gratia)
+library(mapview)
+library(mgcViz)
+library(nngeo)
+library(hms)
+library(aws.s3)
+library(jsonlite)
+library(rvest)
+library(httr)
+library(r5r)
+library(rJava)
+library(paws)
+library(janitor)
+library(data.table)
+library(purrr)
+library(future.apply)
+library(readxl)
+library(future.apply)
+library(here)
+
+# You're going to need a swiftly API key for MTA data
+
+source("functions/mta_api_functions.R")
+
+# turn off scientific notation 
+options(scipen = 999)
+
+# set up parallel processing
+plan(multisession, workers = parallel::detectCores() - 1)  
+```
+
+```{r}
+#holidays and weekends to remove
+all_holidays <- 
+  c("2017-09-04", "2017-09-21", "2017-09-22", "2017-10-09",
+    "2017-11-10", "2017-11-23", "2017-11-24", "2017-12-22",
+    "2017-12-25", "2017-12-26", "2017-12-27", "2017-12-28",
+    "2017-12-29", "2018-09-03", "2018-09-10", "2018-09-19",
+    "2018-09-20", "2018-11-12", "2018-11-22", "2018-11-23",
+    "2018-12-24", "2018-12-25", "2018-12-26", "2018-12-27",
+    "2018-12-28", "2018-12-31", "2019-09-02", "2019-09-30",
+    "2019-10-01", "2019-10-09", "2019-10-14", "2019-11-11",
+    "2019-11-27", "2019-11-28", "2019-11-29", "2019-12-23",
+    "2019-12-24", "2019-12-25", "2020-01-01", "2020-01-20",
+    "2020-02-17", "2020-04-10", "2020-05-25", "2020-06-05",
+    "2020-06-11", "2020-06-12", "2020-06-15", "2020-06-16",
+    "2020-06-17", "2020-06-18", "2020-06-19", "2021-01-01",
+    "2021-01-18", "2021-02-15", "2021-04-02", "2021-05-31",
+    "2021-06-18", "2021-06-21", "2021-06-22", "2021-06-23",
+    "2021-06-24", "2021-06-25", "2022-01-17", "2022-02-21",
+    "2022-04-15", "2022-05-30", "2022-06-17", "2022-06-20",
+    "2022-06-21", "2022-06-22", "2022-06-23", "2022-06-24",
+    "2022-09-05", "2022-11-11", "2022-11-24", "2022-11-25",
+    "2023-01-01", "2023-01-07", "2023-01-08", "2023-01-14",
+    "2023-01-15", "2023-01-21", "2023-01-22", "2023-01-28",
+    "2023-01-29", "2023-02-04", "2023-02-05", "2023-02-11",
+    "2023-02-12", "2023-02-18", "2023-02-19", "2023-02-25",
+    "2023-02-26", "2023-03-04", "2023-03-05", "2023-03-11",
+    "2023-03-12", "2023-03-18", "2023-03-19", "2023-03-25",
+    "2023-03-26", "2023-04-01", "2023-04-02", "2023-04-08",
+    "2023-04-09", "2023-04-15", "2023-04-16", "2023-04-22",
+    "2023-04-23", "2023-04-29", "2023-04-30", "2023-05-06",
+    "2023-05-07", "2023-05-13", "2023-05-14", "2023-05-20",
+    "2023-05-21", "2023-05-27", "2023-05-28", "2023-06-03",
+    "2023-06-04", "2023-06-10", "2023-06-11", "2024-09-02",
+    "2024-10-18", "2024-11-04", "2024-11-05"
+    ) %>% 
+  ymd() %>% as_date
+
+breaks <- c(ymd("2017-03-24"):ymd("2017-04-03"), ymd("2017-06-16"):ymd("2017-09-05"),
+            ymd("2018-03-30"):ymd("2018-04-06"), ymd("2018-06-15"):ymd("2018-09-04"),
+            ymd("2019-04-19"):ymd("2019-04-26"), ymd("2019-06-14"):ymd("2019-09-03"),
+            ymd("2020-04-06"):ymd("2020-04-13"), ymd("2020-06-15"):ymd("2020-09-08"),
+            ymd("2021-03-26"):ymd("2021-04-05"), ymd("2021-06-21"):ymd("2021-09-08"),
+            ymd("2022-04-15"):ymd("2022-04-22"), ymd("2022-06-20"):ymd("2022-09-06"),
+            ymd("2022-12-22"):ymd("2023-01-04"), ymd("2024-11-27"):ymd("2024-11-30"),
+            ymd("2024-12-23"):ymd("2025-01-06")
+            ) %>% 
+  as_date()
+
+to_rm <- c(all_holidays, breaks) %>% as_date
+
+
+
+# grab our data range (i.e. weekdays from the first day of school until Monday, December 2nd)
+weekend <-
+  seq.Date(from = as.Date("2024-08-26"), to = as.Date("2025-01-14"), by = "day") %>%
+  # filter for dates that fall during a weekday
+  tibble(date = .) %>%
+  filter(weekdays(date) %in% c("Saturday", "Sunday")) %>%
+  pull(date) %>% 
+  as_date()
+
+# filter for dates that fall during a weekday
+dates <-
+  seq.Date(from = as.Date("2024-08-26"), to = as.Date("2025-01-14"), by = "day") %>%
+  .[! . %in% to_rm] %>% 
+  .[! . %in% weekend] %>% 
+  as.character()
+```
+
+```{r}
+
+# schedule for grabbing functions 
+grab_and_combine_schedules <- function(route_ids, dates) {
+    
+    full_schedules <- list()  # To store schedules across all dates
+    
+    for(date in dates) {
+      
+      schedules <- list()  # To store schedules for the current date
+      not_running <- list()  # To store routes with no schedules
+      
+      for(id in route_ids) {
+        
+        # schedule query includes route and service date 
+        schedule_queryString <- list(routeKey = id, serviceDate = as.character(date))
+        
+        # make the API call
+        schedule_response <- 
+          VERB("GET", schedule_url, query = schedule_queryString, 
+               add_headers('Authorization' = 'YOUR-API-KEY'), 
+               content_type("application/octet-stream"),
+               accept("application/json"))
+        
+        # sleep to avoid rate limiting
+        Sys.sleep(5)
+        
+        # json response
+        schedule_json <- 
+          content(schedule_response, "text")
+        
+        # if we got a real JSON response (not an error), then we can turn it into a dataframe and begin to process
+        # schedule data is structured as nested JSON objects, so we need to unnest them
+        schedule <- 
+          jsonlite::fromJSON(schedule_json, simplifyDataFrame = T, flatten = T) %>% 
+          .$data %>% 
+          as.data.frame() %>% 
+          clean_names()
+        
+        # if we didn't error...
+        if (nrow(schedule) > 0) {
+          
+          
+          schedule <- schedule %>% 
+            unnest(schedule_times_for_trip) %>%
+            clean_names() %>% 
+            unnest(times) 
+          
+          # get every possible stop in direction 1
+          full_sched_0 <- 
+            schedule %>% 
+            group_by(schedule_direction_id) %>% 
+            slice(1) %>% 
+            filter(schedule_direction_id == "0") %>% 
+            .$schedule_stops %>% 
+            as.data.frame() %>% 
+            mutate(direction = "0",
+                   route_id = id,
+                   row = row_number()) %>% 
+            ungroup()
+          
+          # get every possible stop in direction 2
+          full_sched_1 <- 
+            schedule %>% 
+            group_by(schedule_direction_id) %>% 
+            slice(1) %>% 
+            filter(schedule_direction_id == "1") %>% 
+            .$schedule_stops %>% 
+            as.data.frame() %>% 
+            mutate(direction = "1",
+                   route_id = id,
+                   row = row_number()) %>% 
+            ungroup()
+          
+          # get every stop in both direction 
+          full_sched <- 
+            rbind(full_sched_0, full_sched_1)
+          
+          # bind our df of scheduled trips to their stops 
+          schedule <- 
+            schedule %>% 
+            dplyr::select(-schedule_stops) %>% 
+            mutate(datetime = as_datetime(as.numeric(timeSecs)),
+                   schedtime = hms(seconds_to_period(as.numeric(timeSecs))),
+                   hour = hour(schedtime),
+                   minute = minute(schedtime),
+                   second = second(schedtime)) %>% 
+            group_by(trip_id, schedule_route_id) %>%
+            # arrange(datetime) %>% 
+            mutate(row = row_number()) %>% 
+            ungroup() %>% 
+            # we're joining on route, direction, and row
+            left_join(full_sched, by = c("schedule_route_id" = "route_id",
+                                         "schedule_direction_id" = "direction",
+                                         "row" = "row")) %>% 
+            dplyr::select(route_id, route_name, service_date, 
+                          schedule_direction_id, trip_id, trip_headsign, block_id, 
+                          is_added_service, timeSecs, isWaitStop, datetime, 
+                          schedtime, hour:stopName)
+          
+          # save the schedule to disk
+          schedules[[id]] <- schedule
+          print(id)
+          write_rds(schedule, here::here("data", "schedules_raw", paste0("route_", id, "_", date, ".rds")))
+          
+          Sys.sleep(3)
+        } else {
+          print(paste0("No schedule for route ", id, " - API message: ", schedule_json))
+          not_running[[id]] <- id
+          Sys.sleep(3)
+        }
+      }
+      
+      # Combine schedules for the current date and append to full_schedules
+      if (length(schedules) > 0) {
+        full_schedules[[as.character(date)]] <- rbindlist(schedules, use.names = TRUE)
+      }
+    }
+    
+    # Combine schedules across all dates
+    combined_schedules <- rbindlist(full_schedules, use.names = TRUE)
+    
+    return(combined_schedules)
+}
+```
+
+```{r}
+
+# schedule URL
+schedule_url <- "https://api.goswift.ly/info/mta-maryland/schedule"
+
+# Greg's API key
+auth_header <- 'YOUR-API-KEY'
+
+# make an empty list object for full schedules (by day)
+full_schedules <- list()
+
+
+for (date in dates) {
+  
+  schedules <- list()
+  not_running <- list()
+  
+  
+  for (id in route_ids) {
+    
+    schedule_queryString <- list(routeKey = id, serviceDate = as.character(date))
+    
+    schedule_response <- VERB("GET", schedule_url, query = schedule_queryString, 
+                              add_headers('Authorization' = auth_header), 
+                              content_type("application/octet-stream"), 
+                              accept("application/json"))
+    
+    schedule_json <- content(schedule_response, "text")
+    
+    # build in some rate limiting 
+    Sys.sleep(3)
+    
+    schedule <- jsonlite::fromJSON(schedule_json, simplifyDataFrame = TRUE, flatten = TRUE) %>%
+      .$data %>%
+      as.data.frame() %>%
+      clean_names()
+    
+    if (nrow(schedule) > 0) {
+      
+      schedule <- schedule %>% 
+        unnest(schedule_times_for_trip) %>%
+        clean_names() %>% 
+        unnest(times) 
+      
+      full_sched_0 <- schedule %>%
+        group_by(schedule_direction_id) %>%
+        slice(1) %>%
+        filter(schedule_direction_id == "0") %>%
+        .$schedule_stops %>%
+        as.data.frame() %>%
+        mutate(direction = "0", route_id = id, row = row_number()) %>%
+        ungroup()
+      
+      full_sched_1 <- schedule %>%
+        group_by(schedule_direction_id) %>%
+        slice(1) %>%
+        filter(schedule_direction_id == "1") %>%
+        .$schedule_stops %>%
+        as.data.frame() %>%
+        mutate(direction = "1", route_id = id, row = row_number()) %>%
+        ungroup()
+      
+      full_sched <- rbind(full_sched_0, full_sched_1)
+      
+      schedule <- schedule %>%
+        dplyr::select(-schedule_stops) %>%
+        mutate(datetime = as_datetime(as.numeric(timeSecs)),
+               schedtime = hms(seconds_to_period(as.numeric(timeSecs))),
+               hour = hour(schedtime),
+               minute = minute(schedtime),
+               second = second(schedtime)) %>%
+        group_by(trip_id, schedule_route_id) %>%
+        # arrange(datetime) %>%
+        mutate(row = row_number()) %>%
+        ungroup() %>%
+        left_join(full_sched, by = c("schedule_route_id" = "route_id",
+                                     "schedule_direction_id" = "direction",
+                                     "row" = "row")) %>%
+        dplyr::select(route_id, route_name, service_date, schedule_direction_id, trip_id, 
+                      trip_headsign, block_id, is_added_service, timeSecs, isWaitStop, datetime, 
+                      schedtime, hour:stopName)
+      
+      schedules[[id]] <- schedule
+      
+      print(paste("Processed route", id, "for date", date))
+      
+      write_rds(schedule, here::here("data", "schedules_raw", paste0("route_", id, "_", date, ".rds")))
+      
+    } else {
+      print(paste0("No schedule for route ", id, " on ", date, " - API message: ", schedule_json))
+      not_running[[id]] <- id
+    }
+  }
+  
+  if (length(schedules) > 0) {
+    schedules_df <- rbindlist(schedules, use.names = TRUE)
+    full_schedules[[as.character(date)]] <- schedules_df
+  }
+}
+```
