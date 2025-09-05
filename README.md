@@ -24,7 +24,7 @@ Our final determination: Baltimore’s public transit makes it impossible for mi
 
 ## Data 
 
-[Download the data folder for this project here](https://s3-tbb-data-dev.s3.us-east-1.amazonaws.com/school-transportation-public/data.tar.gz). Make sure that you put it in the root directory of this repo. This folder contains many of the pieces that you'll need to recreate the analysis from scratch, as well as the results from our work. You'll need to allocate about 40 GB of hard drive space for this folder.
+[Download the data folder for this project here](https://tbb-public.s3.us-east-1.amazonaws.com/school-transportation-public/data.tar.gz). Make sure that you put it in the root directory of this repo. This folder contains many of the pieces that you'll need to recreate the analysis from scratch, as well as the results from our work. You'll need to allocate about 40 GB of hard drive space for this folder.
 
 [Download live bus position data here](https://s3-tbb-data-dev.s3.us-east-1.amazonaws.com/school-transportation-public/bus-positions.tar.xz). You will need about 350 GB of local hard drive space for this. We recommend storing this on your desktop to avoid changing some of the filepaths in this repo. You only need this if you're planning on processing raw JSON bus location data.
 

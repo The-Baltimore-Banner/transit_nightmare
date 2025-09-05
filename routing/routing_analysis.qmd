@@ -544,7 +544,7 @@ for(i in 1:nrow(latest_leaving_times_for_detailed_routing)){
 ```{r}
 # read in the csv files
 file_path <- paste0("data/poa/",
-                    today,
+                    "2024-10-02",
                     "/detailed-routes")
 
 file_paths <- list.files(here::here(file_path), full.names = T) %>% unique

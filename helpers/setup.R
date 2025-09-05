@@ -101,7 +101,7 @@ sst_new <- start_stop_times %>%
 
 # load functions I need to access MTA API
 # source("functions/mta_api_functions.R")
-source("functions/mta_api_functions_private.R")
+source("functions/mta_api_functions.R")
 
 
 # Baltimore City Shapes ---------------------------------------------------
